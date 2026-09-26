@@ -1,0 +1,95 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'com.winlator'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.winlator'
+        minSdkVersion 26
+        targetSdkVersion 28
+        versionCode 33
+        versionName "11.2"
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+
+            ndk {
+                abiFilters 'arm64-v8a'
+            }
+        }
+    }
+
+    lintOptions {
+        checkReleaseBuilds false
+    }
+
+    aaptOptions {
+        noCompress 'tzst', 'xz', 'gz', '7z', 'tar', 'zst', 'zip', 'obb', 'iso', 'img', 'bin'
+    }
+
+    ndkVersion '24.0.8215888'
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+        // JavaSteam is compiled with Kotlin 2.x; skip the metadata version check
+        // so it links against the 1.9.0 stdlib used here.
+        freeCompilerArgs += ['-Xskip-metadata-version-check']
+    }
+
+    externalNativeBuild {
+        cmake {
+            version '3.22.1'
+            path 'src/main/cpp/CMakeLists.txt'
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.4.0'
+    implementation 'androidx.preference:preference:1.2.1'
+    implementation 'com.google.android.material:material:1.4.0'
+    implementation 'com.github.luben:zstd-jni:1.5.2-3@aar'
+    implementation 'org.tukaani:xz:1.7'
+    implementation 'org.apache.commons:commons-compress:1.20'
+    implementation 'androidx.lifecycle:lifecycle-process:2.5.1'
+
+    // Game Stores (com.winlator.store)
+    implementation fileTree(dir: 'libs/steam', include: ['*.jar'])
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+    implementation 'com.google.zxing:core:3.5.3'
+    implementation 'com.squareup.okhttp3:okhttp:4.9.3'
+    // DepotDownloader requires okio 3.x (Path/FileSystem added in 3.0); force-upgrade
+    // past the 2.8.0 pulled in transitively by okhttp4.
+    implementation 'com.squareup.okio:okio:3.16.0'
+    // JavaSteam runtime deps (same versions it was built against).
+    implementation 'com.google.protobuf:protobuf-java:4.31.1'
+    implementation 'org.apache.commons:commons-lang3:3.18.0'
+    implementation 'io.ktor:ktor-client-core:3.2.2'
+    implementation 'io.ktor:ktor-client-cio:3.2.2'
+    implementation 'io.ktor:ktor-client-websockets:3.2.2'
+    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0'
+    // Steam CM crypto (JavaSteam CryptoHelper) and TLS providers.
+    // CryptoHelper reflectively loads BouncyCastleProvider — without this dep
+    // every Steam connect dies on the TcpConnection thread with
+    // "SecurityException: Couldn't create security provider" and kills the app.
+    implementation 'org.bouncycastle:bcprov-jdk15on:1.68'
+    implementation 'org.conscrypt:conscrypt-android:2.5.2'
+    implementation 'org.openjsse:openjsse:1.1.7'
+}

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:padding="4dp">
+
+    <LinearLayout
+        android:id="@+id/LLFloatingBar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="@drawable/quick_hud_bar_background"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp"
+        android:gravity="center_vertical">
+
+        <ImageButton
+            android:id="@+id/IBKeyboard"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?selectableItemBackgroundBorderless"
+            android:src="@drawable/icon_keyboard"
+            android:contentDescription="@string/keyboard"
+            android:scaleType="centerInside" />
+
+        <ImageButton
+            android:id="@+id/IBInputControls"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:background="?selectableItemBackgroundBorderless"
+            android:src="@drawable/icon_input_controls"
+            android:contentDescription="@string/controls_profile"
+            android:scaleType="centerInside" />
+
+        <ImageButton
+            android:id="@+id/IBExit"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:background="?selectableItemBackgroundBorderless"
+            android:src="@drawable/icon_exit"
+            android:contentDescription="@string/exit"
+            android:scaleType="centerInside" />
+    </LinearLayout>
+
+    <ImageButton
+        android:id="@+id/IBBall"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/quick_hud_ball_background"
+        android:contentDescription="@string/quick_hud"
+        android:scaleType="centerInside" />
+</LinearLayout>

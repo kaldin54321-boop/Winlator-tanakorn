@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Scrollable so long CPU lists fit in landscape mode where the viewport
+    height is short. -->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:gravity="center_horizontal">
+
+    <ScrollView
+        android:layout_width="360dp"
+        android:layout_height="wrap_content"
+        android:fillViewport="true">
+
+        <com.winlator.widget.CPUListView
+            android:id="@+id/CPUListView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal" />
+    </ScrollView>
+</LinearLayout>

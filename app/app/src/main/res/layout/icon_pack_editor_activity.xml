@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/TVPackName"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <LinearLayout style="@style/Toolbox">
+            <ImageButton
+                style="@style/ListMenuButton"
+                android:id="@+id/BTRename"
+                android:src="@drawable/icon_edit" />
+
+            <ImageButton
+                style="@style/ListMenuButton"
+                android:id="@+id/BTExport"
+                android:src="@drawable/icon_export" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/TVPackInfo"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <View style="@style/HorizontalLine" />
+
+    <Button
+        style="@style/ButtonNeutral"
+        android:id="@+id/BTAddIcons"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/add_icons_from_storage" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/tap_icon_to_remove_hint" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="8dp">
+
+        <GridLayout
+            android:id="@+id/GLIcons"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:columnCount="4"
+            android:alignmentMode="alignMargins" />
+    </ScrollView>
+
+    <TextView
+        android:id="@+id/TVEmpty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:text="@string/no_icons_in_pack" />
+</LinearLayout>

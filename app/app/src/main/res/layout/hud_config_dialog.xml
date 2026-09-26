@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Scrollable so the whole panel (including the live preview) fits in
+    landscape mode where the viewport height is short. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <ScrollView
+        android:layout_width="320dp"
+        android:layout_height="wrap_content"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="8dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="4dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/hud_scale"
+            android:textStyle="bold"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/TVScaleValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="100%"
+            android:textStyle="bold"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <com.winlator.widget.SeekBar
+        android:id="@+id/SBScale"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:minValue="50"
+        app:maxValue="200"
+        app:step="5" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="8dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/hud_transparency"
+            android:textStyle="bold"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/TVTransparencyValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="0"
+            android:textStyle="bold"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <com.winlator.widget.SeekBar
+        android:id="@+id/SBTransparency"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:minValue="0"
+        app:maxValue="100"
+        app:step="1" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/hud_elements"
+        android:textStyle="bold"
+        android:textSize="14sp"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="4dp" />
+
+    <GridLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:columnCount="2"
+        android:alignmentMode="alignMargins">
+
+        <CheckBox
+            android:id="@+id/CBShowFPS"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_fps"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/CBShowRAM"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_ram"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/CBShowCPU"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_cpu"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/CBShowGPU"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_gpu"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/CBShowBattery"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_battery"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/CBShowPower"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_power"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/CBShowRenderer"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_renderer_info"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/CBShowTemp"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:text="@string/show_temp"
+            android:textSize="13sp" />
+    </GridLayout>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/live_preview"
+        android:textStyle="bold"
+        android:textSize="14sp"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="4dp" />
+
+    <FrameLayout
+        android:id="@+id/FLPreviewContainer"
+        android:layout_width="match_parent"
+        android:layout_height="140dp"
+        android:background="#111827"
+        android:padding="8dp">
+
+        <TextView
+            android:id="@+id/TVLivePreview"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="#CC000000"
+            android:padding="6dp"
+            android:typeface="monospace"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:includeFontPadding="false" />
+    </FrameLayout>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <group android:checkableBehavior="single">
+        <item android:icon="@drawable/icon_shortcut" android:id="@+id/menu_item_shortcuts" android:title="@string/shortcuts" />
+        <item android:icon="@drawable/icon_install" android:id="@+id/menu_item_stores" android:title="@string/game_stores" />
+        <item android:icon="@drawable/icon_container" android:id="@+id/menu_item_containers" android:title="@string/containers" />
+        <item android:icon="@drawable/icon_input_controls" android:id="@+id/menu_item_input_controls" android:title="@string/input_controls" />
+        <item android:icon="@drawable/icon_settings" android:id="@+id/menu_item_settings" android:title="@string/settings" />
+        <item android:icon="@drawable/icon_save_manager" android:id="@+id/menu_item_saves" android:title="@string/save_game_manager" />
+        <item android:icon="@drawable/icon_box64rc" android:id="@+id/menu_item_box64_rc" android:title="@string/box64_rc_file" />
+        <item android:icon="@drawable/icon_device" android:id="@+id/menu_item_device" android:title="@string/device" />
+        <item android:icon="@drawable/icon_about_info" android:id="@+id/menu_item_about" android:title="@string/about" />
+    </group>
+</menu>

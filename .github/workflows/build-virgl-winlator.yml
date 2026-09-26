@@ -1,0 +1,1534 @@
+name: Build VirGL (virpipe) for Winlator Frost v3 (aarch64 glibc)
+
+# Produces ONE archive, matching exactly what this project's
+# XServerDisplayActivity.extractGraphicsDriverFiles() extracts for the
+# OpenGL slot (VirGL is OpenGL-slot-only; there is no VirGL Vulkan ICD):
+#   virgl-<version>.tzst
+#     usr/lib/libGL.so.1.7.0  -> virpipe gallium driver baked straight into
+#                                classic libGL (Xlib GLX target, NOT a separate
+#                                dri/*.so plugin)
+# The archive may ALSO conditionally contain private bundled copies, added
+# automatically only if the produced binary actually links against them
+# (detected via readelf after the build):
+#   usr/lib/libtinfo.so.6, usr/lib/libsensors.so.5,
+#   usr/lib/libxcb-xfixes.so.0, usr/lib/libxshmfence.so.1,
+#   usr/lib/libxcb-keysyms.so.1
+#
+# Frost-v3 integration (see GraphicsDrivers.VIRGL, DefaultVersion.VIRGL,
+# XServerDisplayActivity.extractGraphicsDriverFiles):
+#   - OpenGL slot "VirGL" extracts
+#       assets/graphics_driver/virgl-<DefaultVersion.VIRGL>.tzst
+#     into RootFS rootDir (<files>/rootfs). After dropping the produced
+#     .tzst under app/app/src/main/assets/graphics_driver/, bump
+#     DefaultVersion.VIRGL to the built version (e.g. "25.0.7"). No other
+#     app change is needed:
+#     - the cacheId already contains DefaultVersion.valueOf("virgl"), so the
+#       version bump alone forces a one-time re-extract AND drops the stale
+#       on-disk Mesa shader cache (compiled code from 23.1.9 must never be
+#       reused -- its keys do not capture the driver build);
+#     - env is already owned by the VIRGL branch (GALLIUM_DRIVER=virpipe,
+#       VIRGL_NO_READBACK=true, VIRGL_SERVER_PATH plus VirGLConfigDialog
+#       extras) -- do NOT add overrides here;
+#     - mesaDriverMode stays true (the default): virgl is served by the
+#       Mesa-dialect GLX like zink/llvmpipe; only Gladio opts out;
+#     - verification expects exactly libGL.so.1.7.0 for every OpenGL slot,
+#       which is what this archive provides (the base rootfs ships the
+#       libGL.so.1 symlink pointing at it).
+#   - aaptOptions already has noCompress for tzst, so no gradle change needed.
+#
+# Host side (NOT built here, intentionally): the in-app libvirglrenderer.so
+# under app/.../cpp/virglrenderer stays as-is, and it KEEPS WORKING with the
+# old virgl-23.1.9 asset: nothing below changes the host protocol, so the old
+# asset remains a safe fallback.
+#
+# Wire protocol (READ THIS BEFORE CHANGING ANYTHING): the frozen host speaks
+# the CLASSIC vtest wire format -- command ids 1-9 (1=CREATE_RENDERER with NO
+# payload, 2=GET_CAPS as a single request, 3=RESOURCE_CREATE as 11 words with
+# trailing backing size plus an SHM fd passed back, 4=RESOURCE_DESTROY,
+# 5/6=TRANSFER_GET/PUT as 10 words, SHM-backed, no bulk payload, 7=SUBMIT_CMD,
+# 8=RESOURCE_BUSY_WAIT, 9=FLUSH_FRONTBUFFER as [handle, drawable] -- the host
+# presents from its own GL FBO on 9 and Java flushFrontbuffer copies it into
+# the X drawable; stock vtest never sends 9, so the W7 hunk emits it from
+# virgl_vtest_flush_frontbuffer), socket env VIRGL_SERVER_PATH (default
+# /tmp/.virgl_server). That is the exact format the shipped virgl-23.1.9
+# asset was built with (proven from its binary strings: VIRGL_SERVER_PATH,
+# /tmp/.virgl_server, virgl_server_winsys.c, and no vtest symbols at all).
+# Stock Mesa >= 24 instead speaks the RENUMBERED upstream protocol (CREATE=8
+# with a process-name payload, GET_CAPS2+GET_CAPS double request, CREATE2 /
+# TRANSFER2, UNREF, ping handshake, VTEST_SOCKET_NAME env) and ignores
+# VIRGL_SERVER_PATH entirely -- so a stock build connects to the wrong
+# socket and every GL client dies in virgl_block_read ("lost connection to
+# rendering server" + abort(); GPUInfo blank, TestD3D force-closes, while the
+# Wine desktop keeps rendering via MIT-SHM which needs no GL). The "Winlator
+# classic wire-compat" patch step below rewrites the vtest winsys wire
+# functions to the classic shapes/ids (protocol 0, SHM-backed, VIRGL_SERVER_PATH
+# fallback kept), so the new virpipe CORE (the actual bug fixes) runs over the
+# protocol the frozen host understands. Every hunk is anchor-verified in CI;
+# any drift fails loudly with context instead of shipping a dead driver. The
+# app additionally exports VTEST_SOCKET_NAME at the served socket path
+# (XServerDisplayActivity VIRGL branch), so new assets resolve under either
+# app generation.
+#
+# Blackscreen errata (the first virgl-25.0.0 asset showed as detected yet
+# TestD3D stayed black at 0 FPS): context creation and caps use ids 1-2, so
+# detection works even when presentation is dead. Its logcat is the smoking
+# gun: submits flow (up to #3600) yet there is not a single virgl-classic
+# guest line and not a single host flush line -- that asset predates the W8
+# null-dt present plus the W11/X1 diagnostics, so the guest winsys dropped
+# every flush upstream of the host. Findings so far: (a) frontbuffers that are
+# not virgl display-target resources were dropped by the old W8 hunk, so id
+# 9 was never sent (W8 now presents via id 9 regardless of dt; there is no
+# DRI3 code in xlib builds at all -- verified 0 DRI3 strings in both assets
+# -- so LIBGL_DRI3_DISABLE is a harmless no-op kept defensively); (b) vtest
+# protocol v3 extras (blob/capset/param/submit2) have no host handler and
+# would desync the stream -- blob creation is blocked at its caller (W5
+# if(0)), W10 neutralizes the capset sender when present, and the host
+# drains unknown commands instead of misparsing them; (c) the host flush ran
+# without a current EGL context and died on unknown handles silently -- it
+# now makes its context current, guards the lookup, and logs; (d) the frozen
+# host's caps_v2 ends at scanout while Mesa 25's struct is longer, so
+# capability_bits_v2 and later fields arrived as stack garbage (randomly
+# enabling staging paths the classic wire cannot serve) -- S-getcaps now
+# zero-fills and defaults max_texture_samplers; (e) the xmesa swap chain and
+# resource creates are instrumented (W11/X1) because the failing builds never
+# invoked the winsys flush at all -- the swap dies upstream of it; (f) the
+# failing guest sent only tiny cdw=16 submits (vs cdw=1040 healthy) with zero
+# draws and zero id-9 flushes, so the host now logs each submit's ccode
+# breakdown plus any decode failure, and the vrend decoder skips unknown
+# ccodes (NOP/render-condition/texture-barrier/QBO-decorated) instead of
+# aborting the submit tail (which silently dropped draws); (g) one layer
+# above the winsys, virgl_screen.c:virgl_flush_frontbuffer unconditionally
+# runs virgl_flush_eq(vctx,...) and vctx->cbuf -- XMesaSwapBuffers arrives
+# with ctx == NULL (xmesa_swap_st_framebuffer passes no st pipe), so the
+# first swap is a NULL deref and no present ever reaches W7/W8 -- W12 guards
+# both derefs (the winsys flush takes no cmdbuf, so NULL is safe); (h) the
+# 25.0.7 asset DID emit id-9 flushes yet stayed black with FPS counting:
+# host dropped every flush as "unknown drawable=-1610590968" (unsigned
+# 2684376328 = 0xA0005508) while SHM PutImages for the real X window
+# (33554508 = 0x0200004C, head=000... black) kept the FPS counter alive.
+# Root cause: W7/W8 sent (uint32_t)(uintptr_t)winsys_drawable_handle, but
+# that handle is NOT an XID -- it is a struct xlib_drawable* (see
+# src/gallium/include/frontend/xlibsw_api.h: {Visual*, int depth, Drawable
+# drawable} and xm_st.c: flush_frontbuffer(..., &xstfb->buffer->ws, ...)).
+# Truncating the POINTER yields pointer low bits (0xA0...), never the XID
+# at ws->drawable (offset 16 on LP64). W0 includes xlibsw_api.h and W7/W8
+# now dereference ws->drawable (with a NULL guard); the host additionally
+# carries the resource size for a size-based fallback so one bad drawable
+# can never blackscreen again. Log signature to
+# compare: healthy shows growing flush #n at 60 FPS with drawable=0x0200004C-
+# style small XIDs; broken shows flushes for 0xA0... pointer values plus
+# black SHM PutImages (head=000...) on the real window.
+#
+# Design notes:
+#   - Builds run INSIDE a real aarch64 container via QEMU user-mode emulation
+#     (docker/setup-qemu-action), not manual dpkg --add-architecture
+#     cross-compiling. See build-llvmpipe-winlator.yml for the full rationale
+#     (ldconfig SIGSEGV defense, --no-triggers hardening, jammy/glibc-2.35
+#     baseline). All of it applies verbatim here and is repeated below.
+#   - VERSION PIN: default Mesa 25.0.7 -- the same Mesa 25 family as the proven
+#     working llvmpipe-25.0.0 asset, so guest shader behavior and the X
+#     server protocol it was verified against stay in one known-good family,
+#     plus 7 patch releases of virpipe/winsys/frontend fixes over 25.0.0
+#     (the first 25.0.0 asset blackscreened: it predates the W8 null-dt
+#     present and the W12 NULL-ctx guard, so no flush ever reached the host).
+#     Mesa 24.0.x is also accepted via the mesa_version input (same recipe,
+#     no removed-option hazards in the 24-25 range). There is deliberately
+#     NO downgrade to 24.x/23.3: the blackscreen is a presentation/wire gap
+#     the compat layer bridges, not a core rasterizer regression, and an
+#     older Mesa would discard the virpipe glitch fixes that motivate this
+#     upgrade from 23.1.9 in the first place. Do NOT point this at
+#     Mesa 26.x without on-device proof: the in-house 26.0.0 llvmpipe build
+#     enumerated correctly yet rendered clear-color/black only (shared
+#     rasterizer output nothing, plausibly misbuilt under QEMU user-mode CI).
+#   - LLVM is DELIBERATELY NOT INSTALLED and -Dllvm=disabled is MANDATORY.
+#     The virpipe gallium driver has no JIT: it forwards TGSI over the virgl
+#     wire protocol to the host renderer, so there is nothing to compile
+#     guest-side. Enabling LLVM would only bloat libGL with a statically
+#     linked compiler backend plus its libtinfo/libsensors/libzstd fallout
+#     for zero rendering benefit. (Contrast llvmpipe, where llvm=enabled +
+#     static link is mandatory because the rasterizer IS an LLVM JIT.)
+#   - No glslangValidator step: with -Dvulkan-drivers= (empty) there is no
+#     Vulkan ICD to build, so nothing searches for it. (The llvmpipe flow
+#     needs a source-built glslangValidator only because lavapipe does.)
+#   - -Dglx=xlib is the key option: it bakes the virpipe gallium driver
+#     directly into libGL.so instead of producing a separate loadable
+#     dri/*.so plugin, which is what lets the final package be the single
+#     self-contained libGL.so.1.7.0 file the extraction code expects -- the
+#     exact shape of the current virgl-23.1.9.tzst and zink-22.2.5.tzst.
+#   - -Dglx-direct=true: explicit direct-rendering intent (client-side virpipe
+#     raster into SHM pixmaps via MIT-SHM/DRI3, which this X server
+#     implements). This is the default, but spelling it out protects against
+#     a future Mesa default flip silently moving us to indirect protocol
+#     rendering.
+#   - -Ddri3 does NOT exist as a meson option in Mesa >= 25.0.0 (removed
+#     upstream). Do not re-add it: `meson setup` fails outright with
+#     "Unknown option: dri3".
+#   - shared-glapi is DELIBERATELY NOT PASSED. The shipped virgl-23.1.9 libGL
+#     carries a libglapi.so.0 NEEDED entry satisfied by the copy the base
+#     rootfs ships (verified in rootfs.tzst); the Mesa 25/26 xlib target
+#     embeds glapi instead (proven on the llvmpipe-25.0.0 asset: no NEEDED
+#     entry, 70+ glX symbols in dynsym). Either linkage is CORRECT here, so
+#     the workflow detects which one the build produced and gates it
+#     accordingly instead of forcing one: NEEDED libglapi -> the CI gate
+#     proves the rootfs copy satisfies the loader (never bundled -- shadowing
+#     the rootfs file would risk breaking the zink slot, which shares it);
+#     no NEEDED -> self-contained, nothing to prove. Passing the option
+#     explicitly is a future landmine (deprecated in 26, removal would fail
+#     `meson setup` outright, exactly like -Ddri3 did), so it stays omitted.
+#   - -Dzstd=disabled: falls back to zlib for the on-disk shader cache. With
+#     llvm=disabled no static-LLVM link can re-add a libzstd NEEDED behind
+#     our back; the CI gate still proves every NEEDED against the rootfs
+#     inventory, so a surprise is caught loudly rather than shipping a dead
+#     driver. (The base rootfs ships a NEWER libzstd than jammy anyway, same
+#     policy as libz/libdrm/libX11: rootfs-provided, never bundled.)
+#   - Extra gallium media/VDPAU/VA/CL targets are left at Mesa defaults: with
+#     gallium-drivers=virgl,softpipe they are either skipped or built but never
+#     packaged (only libGL.so.* is collected). Deliberately NOT passing
+#     -Dgallium-va/-Dgallium-vdpau/-Dgallium-omx: their exact option spelling
+#     changed across Mesa majors and a wrong spelling fails `meson setup`
+#     outright. Unpackaged extras cost a few build minutes, never correctness.
+#   - Mesa's meson needs >= 1.3 (jammy ships 0.61), so a pinned modern meson
+#     comes via pip -- same reasoning as the llvmpipe flow (no venv: jammy
+#     has no ensurepip; no --break-system-packages: jammy pip 22.0.2 predates
+#     the flag and has no PEP 668 guard).
+#   - Python on jammy is 3.10, satisfying Mesa's >= 3.10 floor; mako/yaml/ply
+#     come from apt (same package list as the llvmpipe flow minus LLVM).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_version:
+        description: "Mesa version to build (must exist as mesa-<ver>.tar.xz on archive.mesa3d.org; 25.0.7 recommended, 24.0.x also supported)"
+        required: true
+        default: "25.0.7"
+
+env:
+  MESA_VERSION: ${{ github.event.inputs.mesa_version || '25.0.7' }}
+  TARGET_TRIPLE: aarch64-linux-gnu
+
+jobs:
+  build-virgl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Mandatory: registers binfmt_misc handlers so the amd64 runner can
+      # execute aarch64 ELF binaries transparently. Without this every
+      # command inside --platform=linux/arm64 below fails with "exec format error".
+      - name: Set up QEMU (aarch64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create output directory
+        run: mkdir -p "${{ github.workspace }}/artifacts"
+
+      - name: Write build script part 1 - toolchain and sources
+        run: |
+          cat > "${{ github.workspace }}/build.sh" <<'PART1_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          MESA_VERSION="${MESA_VERSION:?}"
+
+          echo "==> Neutralizing ldconfig inside the emulated container"
+          # DETERMINISTIC fix for the QEMU user-mode ldconfig SIGSEGV (see
+          # build-llvmpipe-winlator.yml: binfmt qemu v10.2.3, dpkg exit 139
+          # on libc-bin, apt exit 100). Replacing ldconfig with a no-op is
+          # safe: this build only needs files/headers/binaries on disk
+          # (compiler/linker resolve via explicit -L paths from pkg-config,
+          # never via the ld.so cache), and nothing on-device uses
+          # ld.so.cache either (the Android linker ignores it). The container
+          # is ephemeral (docker run --rm), so no restore is needed.
+          if LDCONFIG_PATH="$(command -v ldconfig)"; then
+            mv "$LDCONFIG_PATH" "${LDCONFIG_PATH}.qemu-broken"
+            printf '#!/bin/sh\nexit 0\n' > "$LDCONFIG_PATH"
+            chmod +x "$LDCONFIG_PATH"
+            echo "ldconfig neutralized at ${LDCONFIG_PATH}"
+          fi
+
+          echo "==> Updating apt and installing mandatory build dependencies"
+          apt-get update
+          echo "==> Confirming base image glibc version"
+          ldd --version | head -n1 || true
+          # NOTE: deliberately NO llvm-dev / clang / glslang packages here.
+          # virpipe needs no guest-side JIT (-Dllvm=disabled below) and no
+          # Vulkan ICD is built (-Dvulkan-drivers= empty), so neither
+          # toolchain is required. Fewer packages = smaller QEMU-emulated
+          # install = fewer trigger passes over the neutralized ldconfig.
+          # -o Dpkg::Options::="--no-triggers" is still MANDATORY under QEMU
+          # user-mode emulation (see comment above); a best-effort
+          # `ldconfig || true` afterwards refreshes the cache when the
+          # emulator can.
+          apt-get -o Dpkg::Options::="--no-triggers" install -y --no-install-recommends \
+            ca-certificates curl xz-utils git \
+            build-essential pkg-config cmake ninja-build \
+            python3 python3-pip python3-setuptools python3-wheel \
+            python3-mako python3-yaml python3-ply \
+            bison flex \
+            zstd \
+            zlib1g-dev libexpat1-dev \
+            libdrm-dev \
+            libx11-dev libxext-dev libxfixes-dev libxcb1-dev libxcb-glx0-dev \
+            libxcb-shm0-dev libxcb-dri2-0-dev libxcb-dri3-dev libxcb-present-dev \
+            libxcb-randr0-dev libxcb-sync-dev libxcb-xfixes0-dev \
+            libx11-xcb-dev libxcb-keysyms1-dev \
+            libxshmfence-dev libxxf86vm-dev libxrandr-dev
+          # Best-effort cache refresh; failure is tolerated (see above).
+          ldconfig || true
+
+          # Mesa 25.x needs a meson newer than what jammy packages, so pin a
+          # known-good modern meson via pip, installed straight into the
+          # system interpreter. Deliberately NOT using `python3 -m venv`
+          # (needs the separate python3.10-venv package which isn't installed
+          # by default) and deliberately NOT running "pip install --upgrade
+          # pip" first (the apt-installed pip has no RECORD metadata, so its
+          # self-uninstall step fails) and NOT passing --break-system-packages
+          # (that flag only exists on pip 23.0.1+; jammy ships pip 22.0.2,
+          # which errors with "no such option" -- and jammy has no PEP 668
+          # externally-managed guard in the first place).
+          echo "==> Installing pinned meson via pip (system interpreter)"
+          python3 -m pip install "meson>=1.4,<2.0"
+          hash -r
+          meson --version
+
+          echo "==> Fetching Mesa ${MESA_VERSION} source"
+          mkdir -p /build && cd /build
+          # Retry flags: apt.llvm.org / archive.mesa3d.org are intermittently
+          # unreachable from CI (transient curl exit 7 against one host while
+          # others work). Zero behavior change on success.
+          curl -fL --retry 5 --retry-delay 15 --retry-all-errors \
+            -o "mesa-${MESA_VERSION}.tar.xz" \
+            "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz"
+          tar xf "mesa-${MESA_VERSION}.tar.xz"
+          cd "mesa-${MESA_VERSION}"
+          PART1_EOF
+
+      - name: Write wire-compat patch script part A - socket transport
+        run: |
+          # The frozen in-app host renderer speaks the CLASSIC vtest wire
+          # format (command ids 1-9 with the old shapes -- see the header
+          # comment), while stock Mesa >= 24 speaks the renumbered upstream
+          # protocol. A stock build therefore never interoperates (wrong
+          # socket env, unknown command ids, unknown payload shapes). This
+          # script rewrites the vtest winsys wire functions to the classic
+          # shapes/ids with anchored replacements; every anchor is verified
+          # and any drift fails loudly with context instead of shipping a
+          # dead driver. The virpipe CORE (the actual bug fixes) stays stock.
+          # Written in two parts (this step plus the next) so that no single
+          # run: block exceeds the workflow expression length limit.
+          cat > "${{ github.workspace }}/patch-virgl.py" <<'PYEOF_A'
+          import re
+          import sys
+
+          SOCK = "src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c"
+          WINS = "src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c"
+          XMST = "src/gallium/frontends/glx/xlib/xm_st.c"
+          VSCR = "src/gallium/drivers/virgl/virgl_screen.c"
+          failed = []
+
+          def read(path):
+              with open(path) as f:
+                  return f.read()
+
+          def write(path, text):
+              with open(path, "w") as f:
+                  f.write(text)
+
+          def show(path, keyword, context=3):
+              print("---- context for '%s' in %s ----" % (keyword, path))
+              lines = read(path).split("\n")
+              shown = 0
+              for i, line in enumerate(lines):
+                  if keyword in line:
+                      lo = max(0, i - context)
+                      hi = min(len(lines), i + context + 1)
+                      for j in range(lo, hi):
+                          print("%5d: %s" % (j + 1, lines[j]))
+                      shown += 1
+                      if shown >= 4:
+                          break
+              print("---- end context ----")
+
+          def replace_func(path, sig_pat, new_text, tag, ctx):
+              # Replace the whole function whose signature matches sig_pat
+              # (spanning to its opening brace) through its matching close
+              # brace. Brace matching skips comments/strings/chars. ctx is a
+              # plain keyword shown for diagnostics when the anchor drifts.
+              src = read(path)
+              m = re.search(sig_pat, src, re.S)
+              if not m:
+                  failed.append(tag + ": signature not found")
+                  show(path, ctx)
+                  return
+              open_idx = len(m.group(0)) + m.start() - 1
+              if src[open_idx] != "{":
+                  failed.append(tag + ": pattern must end at '{'")
+                  show(path, tag)
+                  return
+              depth = 0
+              i = open_idx
+              n = len(src)
+              state = None
+              while i < n:
+                  c = src[i]
+                  nxt = src[i + 1] if i + 1 < n else ""
+                  if state is None:
+                      if c == "/" and nxt == "/":
+                          state = "//"
+                          i += 2
+                          continue
+                      if c == "/" and nxt == "*":
+                          state = "/*"
+                          i += 2
+                          continue
+                      if c == '"':
+                          state = '"'
+                          i += 1
+                          continue
+                      if c == "'":
+                          state = "'"
+                          i += 1
+                          continue
+                      if c == "{":
+                          depth += 1
+                      elif c == "}":
+                          depth -= 1
+                          if depth == 0:
+                              break
+                  elif state == "//":
+                      if c == "\n":
+                          state = None
+                  elif state == "/*":
+                      if c == "*" and nxt == "/":
+                          state = None
+                          i += 2
+                          continue
+                  elif state == '"':
+                      if c == "\\":
+                          i += 2
+                          continue
+                      if c == '"':
+                          state = None
+                  elif state == "'":
+                      if c == "\\":
+                          i += 2
+                          continue
+                      if c == "'":
+                          state = None
+                  i += 1
+              if depth != 0:
+                  failed.append(tag + ": unbalanced braces")
+                  return
+              write(path, src[:m.start()] + new_text + src[i + 1:])
+              print(tag + ": replaced OK")
+
+          def replace_once(path, old, new, tag):
+              src = read(path)
+              n = src.count(old)
+              if n != 1:
+                  failed.append(tag + ": anchor found %d times (want 1)" % n)
+                  show(path, old.split("\n")[0].strip()[:40])
+                  return
+              write(path, src.replace(old, new, 1))
+              print(tag + ": replaced OK")
+
+          def replace_optional(path, sig_pat, new_text, tag):
+              # Like replace_func but tolerant: newer/older Mesa majors may
+              # not have the v3 entry point at all. Log and continue instead
+              # of failing the build; the mandatory W5 if(0) gate plus the
+              # host-side unknown-command drain already cover that case.
+              # SAFEGUARD (learned 2026-09-14: a W9 pattern whose first match
+              # was a *call site*, not the definition, stretched across
+              # neighboring functions and ate their markers, dropping the
+              # WINS count 10 -> 9): if the replacement would *reduce* the
+              # marker count, restore the original and skip instead.
+              import re as _re
+              src = read(path)
+              if not _re.search(sig_pat, src, _re.S):
+                  print(tag + ": not present, skipped OK")
+                  return
+              before_markers = src.count("Winlator classic")
+              before_failed = len(failed)
+              replace_func(path, sig_pat, new_text, tag, tag)
+              if len(failed) == before_failed:
+                  after_markers = read(path).count("Winlator classic")
+                  if after_markers < before_markers:
+                      write(path, src)
+                      print(tag + ": ate %d marker(s), reverted and skipped OK"
+                            % (before_markers - after_markers))
+
+          def assert_count(path, sub, want, tag):
+              n = read(path).count(sub)
+              print("%s: %dx (want %d)" % (tag, n, want))
+              if n != want:
+                  failed.append(tag + ": got %d, want %d" % (n, want))
+
+          def assert_min(path, sub, want, tag):
+              n = read(path).count(sub)
+              print("%s: %dx (want >= %d)" % (tag, n, want))
+              if n < want:
+                  failed.append(tag + ": got %d, want >= %d" % (n, want))
+
+          # --- S-env: fall back to VIRGL_SERVER_PATH ---
+          replace_once(SOCK,
+          'const char* socket_name = os_get_option("VTEST_SOCKET_NAME");',
+          'const char* socket_name = os_get_option("VTEST_SOCKET_NAME");\n'
+          '   /* Winlator classic: older app builds export only VIRGL_SERVER_PATH. */\n'
+          '   if (!socket_name)\n'
+          '      socket_name = os_get_option("VIRGL_SERVER_PATH");',
+          "S-env")
+
+          # --- S-inc: string.h + stddef.h for the memset/offsetof below ---
+          replace_once(SOCK,
+          "#include <unistd.h>",
+          "#include <stddef.h>\n"
+          "#include <string.h>\n"
+          "#include <unistd.h>",
+          "S-inc")
+
+          # --- S-init: empty CREATE on classic id 1, no name payload ---
+          replace_func(SOCK,
+          r"static int virgl_vtest_send_init\(struct virgl_vtest_winsys \*vws\)\s*\{",
+          r"""static int virgl_vtest_send_init(struct virgl_vtest_winsys *vws)
+          {
+             uint32_t buf[VTEST_HDR_SIZE];
+
+             /* Winlator classic wire format: empty CREATE_RENDERER (id 1) with no
+              * process-name payload. The frozen host server reads no payload here,
+              * so upstream's extra bytes would desync the stream. */
+             buf[VTEST_CMD_LEN] = 0;
+             buf[VTEST_CMD_ID] = 1; /* classic VCMD_CREATE_RENDERER */
+             virgl_block_write(vws->sock_fd, &buf, sizeof(buf));
+             return 0;
+          }
+          """,
+           "S-init", "virgl_vtest_send_init")
+
+          # --- S-negotiate: no handshake, always protocol 0 ---
+          replace_func(SOCK,
+          r"static int virgl_vtest_negotiate_version\(.*?\)\s*\{",
+          r"""static int virgl_vtest_negotiate_version(struct virgl_vtest_winsys *vws, int version)
+          {
+             /* Winlator classic wire format has no version handshake: the frozen
+              * host server does not answer the ping, so probing would hang this
+              * client in virgl_block_read. Always speak protocol 0. */
+             (void)vws;
+             (void)version;
+             return 0;
+          }
+          """,
+           "S-negotiate", "virgl_vtest_negotiate_version")
+
+          # --- S-getcaps: single GET_CAPS on classic id 2 ---
+          replace_func(SOCK,
+          r"int virgl_vtest_send_get_caps\(.*?\)\s*\{",
+          r"""int virgl_vtest_send_get_caps(struct virgl_vtest_winsys *vws,
+                                        struct virgl_drm_caps *caps)
+          {
+             uint32_t req_buf[VTEST_HDR_SIZE];
+             uint32_t resp_buf[VTEST_HDR_SIZE];
+             uint32_t resp_size, want, got, left, n;
+             char dummy[256];
+             int ret;
+
+             /* The frozen host's caps_v2 ends at scanout while this Mesa's
+              * struct keeps growing (capability_bits_v2, video caps,
+              * max_texture_samplers, ...). Zero the whole struct first so
+              * fields the host never sends are deterministic 0 instead of
+              * stack garbage (garbage capability_bits_v2 would randomly
+              * enable staging/copy-transfer paths the classic wire cannot
+              * serve). */
+             memset(&caps->caps, 0, sizeof(caps->caps));
+
+             /* Winlator classic wire format: a single GET_CAPS (id 2). The frozen
+              * host answers once with {caps_size + 1, 2} plus the caps bytes, so
+              * the upstream GET_CAPS2 + GET_CAPS double request (which would wait
+              * forever for a second reply) must not be used. */
+             req_buf[VTEST_CMD_LEN] = 0;
+             req_buf[VTEST_CMD_ID] = 2; /* classic VCMD_GET_CAPS */
+             virgl_block_write(vws->sock_fd, &req_buf, sizeof(req_buf));
+
+             ret = virgl_block_read(vws->sock_fd, &resp_buf, sizeof(resp_buf));
+             if (ret <= 0)
+                return 0;
+
+             resp_size = resp_buf[VTEST_CMD_LEN] > 0 ? resp_buf[VTEST_CMD_LEN] - 1 : 0;
+             want = sizeof(caps->caps);
+             got = resp_size < want ? resp_size : want;
+             if (got) {
+                ret = virgl_block_read(vws->sock_fd, &caps->caps, got);
+                if (ret <= 0)
+                   return 0;
+             }
+
+             /* Drain anything beyond our caps struct so the stream stays aligned. */
+             left = resp_size > got ? resp_size - got : 0;
+             while (left) {
+                n = left > 256u ? 256u : left;
+                ret = virgl_block_read(vws->sock_fd, dummy, n);
+                if (ret <= 0)
+                   break;
+                left -= n;
+             }
+             /* max_texture_samplers was added after the frozen host's caps_v2
+              * (it ends at scanout): with only the memset above it would stay
+              * 0 and disable all texture samplers. Default to PIPE's ceiling
+              * when the host did not send that far. */
+             if (resp_size < offsetof(struct virgl_caps_v2, max_texture_samplers) +
+                              sizeof(caps->caps.v2.max_texture_samplers))
+                caps->caps.v2.max_texture_samplers = 32;
+             return 0;
+          }
+          """,
+           "S-getcaps", "virgl_vtest_send_get_caps")
+
+          # --- S-create: 11-word SHM create on classic id 3 ---
+          replace_func(SOCK,
+          r"int virgl_vtest_send_resource_create\(.*?\)\s*\{",
+          r"""int virgl_vtest_send_resource_create(struct virgl_vtest_winsys *vws,
+                                               uint32_t handle,
+                                               enum pipe_texture_target target,
+                                               uint32_t format,
+                                               uint32_t bind,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               uint32_t depth,
+                                               uint32_t array_size,
+                                               uint32_t last_level,
+                                               uint32_t nr_samples,
+                                               uint32_t size,
+                                               int *out_fd)
+          {
+             uint32_t res_create_buf[11];
+             uint32_t vtest_hdr[VTEST_HDR_SIZE];
+
+             /* Winlator classic wire format: the 11-word create layout (trailing
+              * backing size) on the classic VCMD_RESOURCE_CREATE id (3), with the
+              * host passing back an SHM fd exactly like upstream CREATE2. The
+              * frozen host reads 11 words here; the stock 10-word shape would
+              * desync it.
+              * RETURNS THE HANDLE (0 = failure): the winsys caller does
+              * new_handle = send_resource_create(...); if (new_handle == 0) fail.
+              * Returning 0 on success would fail EVERY resource and NULL-deref
+              * in TestD3D (page fault at 0). */
+             vtest_hdr[VTEST_CMD_LEN] = 11;
+             vtest_hdr[VTEST_CMD_ID] = 3; /* classic VCMD_RESOURCE_CREATE */
+
+             res_create_buf[0] = handle;
+             res_create_buf[1] = target;
+             res_create_buf[2] = format;
+             res_create_buf[3] = bind;
+             res_create_buf[4] = width;
+             res_create_buf[5] = height;
+             res_create_buf[6] = depth;
+             res_create_buf[7] = array_size;
+             res_create_buf[8] = last_level;
+             res_create_buf[9] = nr_samples;
+             res_create_buf[10] = size;
+
+             virgl_block_write(vws->sock_fd, &vtest_hdr, sizeof(vtest_hdr));
+             virgl_block_write(vws->sock_fd, &res_create_buf, sizeof(res_create_buf));
+
+             /* Zero-size resources (e.g. multisample) have no backing store and
+              * the host sends no fd for them. */
+             if (size == 0) {
+                *out_fd = -1;
+                return handle;
+             }
+
+             *out_fd = virgl_vtest_receive_fd(vws->sock_fd);
+             if (*out_fd < 0) {
+                fprintf(stderr, "failed to get fd\n");
+                return 0;
+             }
+
+             return handle;
+          }
+          """,
+           "S-create", "virgl_vtest_send_resource_create")
+          PYEOF_A
+
+      - name: Write wire-compat patch script part B - transfers and verification
+        run: |
+          cat >> "${{ github.workspace }}/patch-virgl.py" <<'PYEOF_B'
+
+          # --- S-xfercmd: 10-word SHM transfers, classic ids passed by callers ---
+          replace_func(SOCK,
+          r"static int virgl_vtest_send_transfer_cmd\(.*?\)\s*\{",
+          r"""static int virgl_vtest_send_transfer_cmd(struct virgl_vtest_winsys *vws,
+                                                    uint32_t vcmd,
+                                                    uint32_t handle,
+                                                    uint32_t level,
+                                                    const struct pipe_box *box,
+                                                    uint32_t buf_offset)
+          {
+             uint32_t vtest_hdr[VTEST_HDR_SIZE];
+             uint32_t cmd[10];
+
+             /* Winlator classic wire format: 10-word transfer headers, SHM-backed,
+              * no bulk payload (pixels travel through the SHM backing). Word 8 is
+              * unused, word 9 is the buffer offset. Classic ids (GET=5, PUT=6)
+              * arrive via vcmd from the callers below. */
+             vtest_hdr[VTEST_CMD_LEN] = 10;
+             vtest_hdr[VTEST_CMD_ID] = vcmd;
+
+             cmd[0] = handle;
+             cmd[1] = level;
+             cmd[2] = box->x;
+             cmd[3] = box->y;
+             cmd[4] = box->z;
+             cmd[5] = box->width;
+             cmd[6] = box->height;
+             cmd[7] = box->depth;
+             cmd[8] = 0;
+             cmd[9] = buf_offset;
+             virgl_block_write(vws->sock_fd, &vtest_hdr, sizeof(vtest_hdr));
+             virgl_block_write(vws->sock_fd, &cmd, sizeof(cmd));
+
+             return 0;
+          }
+          """,
+           "S-xfercmd", "virgl_vtest_send_transfer_cmd")
+
+          # --- S-get/S-put: header-only callers with classic ids ---
+          replace_func(SOCK,
+          r"int virgl_vtest_send_transfer_get\(.*?\)\s*\{",
+          r"""int virgl_vtest_send_transfer_get(struct virgl_vtest_winsys *vws,
+                                            uint32_t handle,
+                                            uint32_t level, uint32_t stride,
+                                            uint32_t layer_stride,
+                                            const struct pipe_box *box,
+                                            uint32_t data_size,
+                                            uint32_t offset)
+          {
+             /* Winlator classic: header-only; completion is barriered by the
+              * busy-wait in the winsys transfer_get path. */
+             return virgl_vtest_send_transfer_cmd(vws, 5 /* classic VCMD_TRANSFER_GET */,
+                                                  handle, level, box, offset);
+          }
+          """,
+           "S-get", "virgl_vtest_send_transfer_get")
+
+          replace_func(SOCK,
+          r"int virgl_vtest_send_transfer_put\(.*?\)\s*\{",
+          r"""int virgl_vtest_send_transfer_put(struct virgl_vtest_winsys *vws,
+                                            uint32_t handle,
+                                            uint32_t level, uint32_t stride,
+                                            uint32_t layer_stride,
+                                            const struct pipe_box *box,
+                                            uint32_t data_size,
+                                            uint32_t offset)
+          {
+             /* Winlator classic: header-only; pixels already live in the SHM
+              * backing, so no bulk payload follows. */
+             return virgl_vtest_send_transfer_cmd(vws, 6 /* classic VCMD_TRANSFER_PUT */,
+                                                  handle, level, box, offset);
+          }
+          """,
+           "S-put", "virgl_vtest_send_transfer_put")
+
+          # --- S-unref/submit/busy: classic ids ---
+          replace_once(SOCK,
+          "vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_UNREF;",
+          "vtest_hdr[VTEST_CMD_ID] = 4; /* Winlator classic VCMD_RESOURCE_DESTROY */",
+          "S-unref")
+          # --- S-submit2: classic id + submit tracing (diagnostic) ---
+          replace_func(SOCK,
+          r"int virgl_vtest_submit_cmd\(.*?\)\s*\{",
+          r"""int virgl_vtest_submit_cmd(struct virgl_vtest_winsys *vws,
+                                   uint32_t *buf, uint32_t buf_len)
+          {
+             uint32_t vtest_hdr[VTEST_HDR_SIZE];
+             /* Winlator classic VCMD_SUBMIT_CMD is id 7; log volume to prove
+              * command flow from guest to host is alive. */
+             {
+                static int submit_n = 0;
+                /* First-3 only: the periodic trace drowned early boot/present
+                 * diagnostics in logcat (hundreds of thousands of fence-sync
+                 * submits per session). */
+                if (submit_n < 3)
+                   fprintf(stderr, "virgl-classic: submit #%d cdw=%u\n", submit_n, buf_len);
+                submit_n++;
+             }
+             vtest_hdr[VTEST_CMD_LEN] = buf_len;
+             vtest_hdr[VTEST_CMD_ID] = 7; /* Winlator classic VCMD_SUBMIT_CMD */
+             virgl_block_write(vws->sock_fd, &vtest_hdr, sizeof(vtest_hdr));
+             virgl_block_write(vws->sock_fd, buf, 4 * buf_len);
+             return 0;
+          }
+          """,
+           "S-submit", "virgl_vtest_submit_cmd")
+          replace_once(SOCK,
+          "vtest_hdr[VTEST_CMD_LEN] = VCMD_BUSY_WAIT_SIZE;\n"
+          "   vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_BUSY_WAIT;\n"
+          "   cmd[VCMD_BUSY_WAIT_HANDLE] = handle;",
+          "vtest_hdr[VTEST_CMD_LEN] = VCMD_BUSY_WAIT_SIZE;\n"
+          "   vtest_hdr[VTEST_CMD_ID] = 8; /* Winlator classic VCMD_RESOURCE_BUSY_WAIT */\n"
+          "   cmd[VCMD_BUSY_WAIT_HANDLE] = handle;",
+          "S-busy")
+
+          # --- W0: include the xlib drawable struct for real XID extraction ---
+          # winsys_drawable_handle is a struct xlib_drawable* (NOT an XID);
+          # W7/W8 must dereference ws->drawable (see header errata (h)).
+          replace_once(WINS,
+          '#include "virgl_vtest_winsys.h"',
+          '#include "virgl_vtest_winsys.h"\n'
+          '#include "frontend/xlibsw_api.h"\n'
+          '/* Winlator classic: struct xlib_drawable for real-XID flushes. */',
+          "W0-include")
+
+          # --- W1a: drop the local-malloc backing branch ---
+          replace_once(WINS,
+          "   } else if (vtws->protocol_version < 2) {\n"
+          "      res->ptr = align_malloc(size, 64);\n"
+          "      if (!res->ptr) {\n"
+          "         FREE(res);\n"
+          "         return NULL;\n"
+          "      }\n"
+          "   }",
+          "   }\n"
+          "   /* Winlator classic: no local malloc backing; every sized resource is\n"
+          "    * backed by host-provided SHM mapped below. */",
+          "W1a-malloc")
+
+          # --- W1b: always SHM-map the host backing ---
+          replace_once(WINS,
+          "   if (vtws->protocol_version >= 2) {\n"
+          "      if (res->size == 0) {",
+          "   /* Winlator classic: always SHM-map the host backing (zero-size\n"
+          "    * resources have none); the version gate is intentionally dropped. */\n"
+          "   {\n"
+          "      if (res->size == 0) {",
+          "W1b-mmap")
+
+          # --- W2: transfer_put is header-only (no bulk) ---
+          replace_once(WINS,
+          "   if (vtws->protocol_version >= 2)\n"
+          "      return 0;\n"
+          "\n"
+          "   ptr = virgl_vtest_resource_map(vws, res);\n"
+          "   virgl_vtest_send_transfer_put_data(vtws, ptr + buf_offset, size);\n"
+          "   virgl_vtest_resource_unmap(vws, res);\n"
+          "   return 0;",
+          "   /* Winlator classic: pixels already live in the SHM backing, so the\n"
+          "    * header sent above is the whole transfer. */\n"
+          "   return 0;",
+          "W2-put")
+
+          # --- W3: transfer_get reads host-written SHM behind a busy-wait barrier ---
+          replace_once(WINS,
+          "   } else {\n"
+          "      ptr = virgl_vtest_resource_map(vws, res);\n"
+          "      virgl_vtest_recv_transfer_get_data(vtws, ptr + buf_offset, size,\n"
+          "                                         valid_stride, box, res->format);\n"
+          "      virgl_vtest_resource_unmap(vws, res);\n"
+          "   }",
+          "   } else {\n"
+          "      /* Winlator classic: SHM-backed like protocol >= 2 (see W1b), so\n"
+          "       * the host wrote the result straight into our SHM backing and\n"
+          "       * sends no bulk reply. Barrier with WAIT, then for frontbuffer\n"
+          "       * flushes copy SHM -> displaytarget exactly like the >= 2 path\n"
+          "       * above (without this the displaytarget stays black forever).\n"
+          "       * Plain readbacks only need the barrier (pixels already in SHM). */\n"
+          "      if (flush_front_buffer) {\n"
+          "         if (box->depth > 1 || box->z > 1) {\n"
+          "            fprintf(stderr, \"Expected a 2D resource, received a 3D resource\\n\");\n"
+          "            return -1;\n"
+          "         }\n"
+          "         virgl_vtest_busy_wait(vtws, res->res_handle, VCMD_BUSY_WAIT_FLAG_WAIT);\n"
+          "         if (res->dt) {\n"
+          "            void *dt_map;\n"
+          "            uint32_t shm_stride;\n"
+          "            shm_stride = util_format_get_stride(res->format, res->width);\n"
+          "            ptr = virgl_vtest_resource_map(vws, res);\n"
+          "            dt_map = vtws->sws->displaytarget_map(vtws->sws, res->dt, 0);\n"
+          "            util_copy_rect(dt_map, res->format, res->stride, box->x, box->y,\n"
+          "                           box->width, box->height, ptr, shm_stride, box->x,\n"
+          "                           box->y);\n"
+          "            virgl_vtest_resource_unmap(vws, res);\n"
+          "            vtws->sws->displaytarget_unmap(vtws->sws, res->dt);\n"
+          "         }\n"
+          "      } else {\n"
+          "         virgl_vtest_busy_wait(vtws, res->res_handle, VCMD_BUSY_WAIT_FLAG_WAIT);\n"
+          "         ptr = virgl_vtest_resource_map(vws, res);\n"
+          "         virgl_vtest_resource_unmap(vws, res);\n"
+          "      }\n"
+          "   }",
+          "W3-get")
+
+          # --- W4: backings are always SHM mappings (or NULL) ---
+          replace_once(WINS,
+          "   if (vtws->protocol_version >= 2) {\n"
+          "      if (res->ptr)\n"
+          "         os_munmap(res->ptr, res->size);\n"
+          "   } else {\n"
+          "      align_free(res->ptr);\n"
+          "   }",
+          "   /* Winlator classic: every backing is a host-SHM mapping (or NULL). */\n"
+          "   if (res->ptr)\n"
+          "      os_munmap(res->ptr, res->size);",
+          "W4-destroy")
+
+          # --- W5: never take the blob create path (frozen host has no handler) ---
+          replace_once(WINS,
+          "   if ((flags & (VIRGL_RESOURCE_FLAG_MAP_PERSISTENT |\n"
+          "                 VIRGL_RESOURCE_FLAG_MAP_COHERENT))) {",
+          "   /* Winlator classic: the frozen host serves ids 1-9 only and has no\n"
+          "    * CREATE_BLOB handler; a blob create would get no reply and hang the\n"
+          "    * GL thread forever (black window, FPS 0, GPU idle). Force every\n"
+          "    * resource through the classic SHM create above; persistents are\n"
+          "    * served synchronously instead. */\n"
+          "   if (0) {",
+          "W5-noblob")
+
+          # --- W6: do not advertise coherent/persistent maps to the driver core ---
+          replace_once(WINS,
+          "   vtws->base.supports_coherent = 1;",
+          "   /* Winlator classic: see W5 -- keep the driver core off the persistent/\n"
+          "    * coherent fast path so it uses synchronous transfers instead. */\n"
+          "   vtws->base.supports_coherent = 0;",
+          "W6-nocoherent")
+
+          # --- W7: also send classic FLUSH_FRONTBUFFER (id 9) on present ---
+          # winsys_drawable_handle is struct xlib_drawable* (xm_st.c passes
+          # &xstfb->buffer->ws); the XID lives at ws->drawable. Sending the
+          # truncated POINTER (old code) yields 0xA0... values the host drops
+          # as unknown drawable -> black window with FPS from SHM fallback.
+          replace_once(WINS,
+          "   vtws->sws->displaytarget_display(vtws->sws, res->dt, winsys_drawable_handle,\n"
+          "                                    !!sub_box, sub_box);",
+          "   vtws->sws->displaytarget_display(vtws->sws, res->dt, winsys_drawable_handle,\n"
+          "                                    !!sub_box, sub_box);\n"
+          "   /* Winlator classic: the frozen host presents from its own GL FBO when\n"
+          "    * it receives VCMD_FLUSH_FRONTBUFFER (id 9), and Java flushFrontbuffer\n"
+          "    * then copies it into the X drawable. Stock vtest never sends 9, so\n"
+          "    * without this the window stays black and FPS stays 0. */\n"
+          "   {\n"
+          "      static int flush_n = 0;\n"
+          "      uint32_t flush_hdr[VTEST_HDR_SIZE];\n"
+          "      uint32_t flush_cmd[2];\n"
+          "      char *flush_ptr;\n"
+          "      int flush_left;\n"
+          "      int flush_ret;\n"
+          "      uint32_t real_drawable = 0;\n"
+          "      if (winsys_drawable_handle)\n"
+          "         real_drawable = (uint32_t)((struct xlib_drawable *)winsys_drawable_handle)->drawable;\n"
+          "      flush_hdr[VTEST_CMD_LEN] = 2;\n"
+          "      flush_hdr[VTEST_CMD_ID] = 9; /* Winlator classic VCMD_FLUSH_FRONTBUFFER */\n"
+          "      flush_cmd[0] = res->res_handle;\n"
+          "      flush_cmd[1] = real_drawable;\n"
+          "      if (flush_n < 3) {\n"
+          "         fprintf(stderr, \"virgl-classic: flush handle=%u drawable=%u (%p real) %ux%u\\n\",\n"
+          "                 flush_cmd[0], flush_cmd[1], winsys_drawable_handle, res->width, res->height);\n"
+          "      }\n"
+          "      flush_n++;\n"
+          "      flush_ptr = (char *)flush_hdr;\n"
+          "      flush_left = sizeof(flush_hdr);\n"
+          "      while (flush_left > 0) {\n"
+          "         flush_ret = write(vtws->sock_fd, flush_ptr, flush_left);\n"
+          "         if (flush_ret <= 0)\n"
+          "            break;\n"
+          "         flush_left -= flush_ret;\n"
+          "         flush_ptr += flush_ret;\n"
+          "      }\n"
+          "      flush_ptr = (char *)flush_cmd;\n"
+          "      flush_left = sizeof(flush_cmd);\n"
+          "      while (flush_left > 0) {\n"
+          "         flush_ret = write(vtws->sock_fd, flush_ptr, flush_left);\n"
+          "         if (flush_ret <= 0)\n"
+          "            break;\n"
+          "         flush_left -= flush_ret;\n"
+          "         flush_ptr += flush_ret;\n"
+          "      }\n"
+          "   }",
+          "W7-flush9")
+
+          # --- W8: still present when there is no display target ---
+          # Mesa >= 24 on the DRI3 present path swaps frontbuffers that are
+          # NOT virgl display-target resources (res->dt == NULL). The old
+          # diagnostic dropped those flushes, so the frozen host (which
+          # presents from its own GL FBO on classic id 9) never presented:
+          # permanent black window at 0 FPS while caps/context creation still
+          # succeeded. Emit the id-9 flush here too, then return (the guest
+          # has no displaytarget to update locally; the host FBO is the
+          # whole present). The dt != NULL path below (W7) is unchanged.
+          # Same XID rule as W7: dereference struct xlib_drawable, never the
+          # pointer itself (see header errata (h)).
+          replace_once(WINS,
+          "   if (!res->dt)\n"
+          "      return;",
+          "   if (!res->dt) {\n"
+          "      /* Winlator classic: no guest display target, but the host still\n"
+          "       * presents from its own GL FBO on VCMD_FLUSH_FRONTBUFFER (id 9). */\n"
+          "      static int nodt_n = 0;\n"
+          "      uint32_t nodt_hdr[VTEST_HDR_SIZE];\n"
+          "      uint32_t nodt_cmd[2];\n"
+          "      uint32_t nodt_drawable = 0;\n"
+          "      if (winsys_drawable_handle)\n"
+          "         nodt_drawable = (uint32_t)((struct xlib_drawable *)winsys_drawable_handle)->drawable;\n"
+          "      if (nodt_n < 3)\n"
+          "         fprintf(stderr, \"virgl-classic: flush with NULL dt, presenting via id 9 handle=%u drawable=%u\\n\",\n"
+          "                 res->res_handle, nodt_drawable);\n"
+          "      nodt_n++;\n"
+          "      nodt_hdr[VTEST_CMD_LEN] = 2;\n"
+          "      nodt_hdr[VTEST_CMD_ID] = 9; /* Winlator classic VCMD_FLUSH_FRONTBUFFER */\n"
+          "      nodt_cmd[0] = res->res_handle;\n"
+          "      nodt_cmd[1] = nodt_drawable;\n"
+          "      { char *p_ = (char *)nodt_hdr; int l_ = sizeof(nodt_hdr), r_;\n"
+          "        while (l_ > 0) { r_ = write(vtws->sock_fd, p_, l_);\n"
+          "          if (r_ <= 0) break; l_ -= r_; p_ += r_; } }\n"
+          "      { char *p_ = (char *)nodt_cmd; int l_ = sizeof(nodt_cmd), r_;\n"
+          "        while (l_ > 0) { r_ = write(vtws->sock_fd, p_, l_);\n"
+          "          if (r_ <= 0) break; l_ -= r_; p_ += r_; } }\n"
+          "      return;\n"
+          "   }",
+          "W8-flushdt")
+
+          # --- W9: REMOVED (was: neutralize virgl_vtest_send_create_blob) ---
+          # The blob path is already dead via the mandatory W5 if(0) gate at
+          # its caller, so replacing the function itself buys nothing -- and
+          # the name's first occurrence in this file is a *call site*, so a
+          # function-signature regex stretched across neighboring functions
+          # and ate their markers (WINS count dropped 10 -> 9, failing the
+          # gate). Do not re-add a function-level blob hunk here.
+          #
+          # --- W10: neutralize v3 capset/param queries (host serves caps v2) ---
+          # Tolerant for the same reason as W9.
+          replace_optional(WINS,
+          r"virgl_vtest_send_get_capset\(.*?\)\s*\{",
+          r"""int virgl_vtest_send_get_capset(struct virgl_vtest_winsys *vws,
+                                                uint32_t capset, uint32_t version,
+                                                void *caps, uint32_t size)
+          {
+             /* Winlator classic: the frozen host serves the classic GET_CAPS
+              * (id 2) only; claim unsupported so callers use that path. */
+             (void)vws; (void)capset; (void)version; (void)caps; (void)size;
+             return -1;
+          }
+          """,
+           "W10-nocapset")
+
+          # --- W11: log every resource create (swapchain health diagnostic) ---
+          # Cache misses land here with bind/size/dt state; throttled so
+          # logcat keeps early lines. No creates logged here plus X1 firing
+          # below means the frontend never got as far as swap.
+          replace_once(WINS,
+          "out:\n"
+          "   virgl_resource_cache_entry_init(&res->cache_entry, params);",
+          "   /* Winlator classic diagnostic: swapchain health. */\n"
+          "   {\n"
+          "      static int mkres_n = 0;\n"
+          "      if (mkres_n < 16)\n"
+          "         fprintf(stderr, \"virgl-classic: create ok handle=%u bind=%u %ux%u size=%d dt=%p ptr=%p\\n\",\n"
+          "                 res->res_handle, res->bind, res->width, res->height, res->size,\n"
+          "                 (void *)res->dt, res->ptr);\n"
+          "      mkres_n++;\n"
+          "   }\n"
+          "out:\n"
+          "   virgl_resource_cache_entry_init(&res->cache_entry, params);",
+           "W11-mkres")
+
+           # --- W12: survive NULL-ctx flushes from the xlib swap path (present) ---
+           # XMesaSwapBuffers calls screen->flush_frontbuffer with ctx == NULL
+           # (xmesa_swap_st_framebuffer passes no st pipe; pending draws were
+           # already submitted by st_context_flush just above it in xm_api.c).
+           # Stock virgl_screen.c then runs virgl_flush_eq(vctx,...) AND
+           # vctx->cbuf, both dereferencing NULL -> SIGSEGV on the first swap,
+           # and even without the crash the winsys flush below would never run,
+           # so no id-9 present ever reaches the frozen host (black window at
+           # 0 FPS while submits keep flowing -- the exact TestD3D signature
+           # of the first 25.0.0 asset, whose logcat shows submits but zero
+           # flushes). Guard both derefs; the winsys flush takes no cmdbuf
+           # (UNUSED) so NULL is safe and the present still reaches the host
+           # via W7/W8. Anchor is the whole if-block (stable since Mesa 23).
+          replace_once(VSCR,
+           "   if (vws->flush_frontbuffer) {\n"
+           "      virgl_flush_eq(vctx, vctx, NULL);\n"
+           "      vws->flush_frontbuffer(vws, vctx->cbuf, vres->hw_res, level, layer, winsys_drawable_handle,\n"
+           "                             nboxes == 1 ? sub_box : NULL);\n"
+           "   }",
+           "   /* Winlator classic: XMesaSwapBuffers arrives with ctx == NULL. */\n"
+           "   if (vws->flush_frontbuffer) {\n"
+           "      if (vctx)\n"
+           "         virgl_flush_eq(vctx, vctx, NULL);\n"
+           "      vws->flush_frontbuffer(vws, vctx ? vctx->cbuf : NULL, vres->hw_res, level, layer, winsys_drawable_handle,\n"
+           "                             nboxes == 1 ? sub_box : NULL);\n"
+           "   }",
+           "W12-nullctx")
+
+           # --- X0/X1: log silent swap skips in the xlib frontend (diagnostic) ---
+          # xmesa swap -> display() returns success without presenting when the
+          # BACK texture was never allocated (resource_create failed upstream).
+          # That state is otherwise indistinguishable from a working swap.
+          replace_once(XMST,
+          "#include \"state_tracker/st_context.h\"",
+          "#include <stdio.h>\n"
+          "#include \"state_tracker/st_context.h\"",
+          "X0-stdio")
+          replace_once(XMST,
+          "   if (!ptex)\n"
+          "      return true;",
+          "   if (!ptex) {\n"
+          "      /* Winlator classic diagnostic: swap with no BACK texture means\n"
+          "       * the swapchain resource_create failed upstream; the swap is a\n"
+          "       * silent no-op (black window, 0 FPS) unless logged here. */\n"
+          "      static int nulltex_n = 0;\n"
+          "      if (nulltex_n < 8)\n"
+          "         fprintf(stderr, \"virgl-classic: swap display with NULL %s texture (silent skip %d)\\n\",\n"
+          "                 statt == ST_ATTACHMENT_BACK_LEFT ? \"BACK\" : \"other\", nulltex_n);\n"
+          "      nulltex_n++;\n"
+          "      return true;\n"
+          "   }",
+          "X1-nulltex")
+
+           # --- verification: every hunk left exactly one marker ---
+           # NOTE: S-submit2 and W7-flush9 each legitimately contain TWO
+           # "Winlator classic" markers (explanatory comment + code comment),
+           # hence 12 SOCK. WINS is a minimum, not exact: W10 is optional
+           # (present only on Mesa majors that have that v3 entry point), so
+           # the base 12 markers (W0..W8 + W11) may grow by up to 1. VSCR
+           # carries the single W12 NULL-ctx guard marker.
+          assert_count(SOCK, "Winlator classic", 12, "A-sock-markers")
+          assert_min(WINS, "Winlator classic", 12, "A-wins-markers")
+          assert_min(XMST, "Winlator classic", 1, "A-xmst-markers")
+          assert_min(VSCR, "Winlator classic", 1, "A-vscr-markers")
+          assert_min(WINS, "presenting via id 9", 1, "A-flush-nodt")
+          assert_min(WINS, "xlibsw_api.h", 1, "A-xlib-include")
+          assert_min(WINS, "struct xlib_drawable", 2, "A-xid-deref")
+          assert_count(WINS, "(uint32_t)(uintptr_t)winsys_drawable_handle", 0, "A-no-ptr-flush")
+          assert_min(SOCK, "VIRGL_SERVER_PATH", 2, "A-env-fallback")
+          assert_count(WINS, "align_malloc(size, 64)", 0, "A-no-malloc")
+          assert_count(WINS, "virgl_vtest_send_transfer_put_data", 0, "A-no-put-bulk")
+          assert_count(WINS, "virgl_vtest_recv_transfer_get_data", 0, "A-no-get-bulk")
+
+          if failed:
+              print("PATCH FAILED:")
+              for f in failed:
+                  print("  - " + f)
+              sys.exit(1)
+          print("Winlator classic wire-compat patch applied cleanly")
+          PYEOF_B
+
+      - name: Write build script part 2 - configure, build, package
+        run: |
+          cat >> "${{ github.workspace }}/build.sh" <<'PART2_EOF'
+
+          echo "==> Applying Winlator classic wire-compat patch to the vtest winsys"
+          python3 /patch-virgl.py
+
+          echo "==> Configuring build (single-file classic libGL with virpipe baked in)"
+          # gallium-drivers=virgl,softpipe -> virpipe is the driver this
+          #                            package serves; softpipe is compiled in
+          #                            alongside it because Mesa HARD-REQUIRES
+          #                            it for the xlib target (`meson setup`
+          #                            fails outright with "xlib based GLX
+          #                            requires softpipe or llvmpipe"
+          #                            otherwise -- observed 2026-09-13 on Mesa
+          #                            25.0.0). softpipe is never selected at
+          #                            runtime: the app forces
+          #                            GALLIUM_DRIVER=virpipe, and softpipe
+          #                            needs no LLVM JIT, so -Dllvm=disabled
+          #                            below stays valid. This pairing is
+          #                            proven: the shipped virgl-23.1.9 libGL
+          #                            contains exactly virpipe + softpipe
+          #                            (and no llvmpipe), so the CI gates
+          #                            below assert that same composition.
+          # vulkan-drivers= (empty) -> virgl is OpenGL-slot-only; no ICD, no
+          #                            manifest, no glslangValidator needed
+          # glx=xlib                 -> MANDATORY for a single self-contained
+          #                             libGL.so: bakes virpipe straight into
+          #                             libGL instead of a separate dri/*.so
+          #                             plugin loaded via DRI search path --
+          #                             the exact shape of virgl-23.1.9.tzst
+          # egl/gbm disabled          -> not part of the package frost-v3
+          #                             expects for this driver; omit to avoid
+          #                             producing files that won't be shipped
+          # llvm=disabled            -> MANDATORY (see header): virpipe has no
+          #                             JIT, it forwards TGSI to the host
+          # shared-llvm=disabled     -> belt and braces: with llvm disabled
+          #                             there is nothing to share, but the
+          #                             spelling `disabled` (not `false`)
+          #                             keeps `meson setup` working if a
+          #                             future Mesa deprecates/removes `false`
+          # glx-direct=true           -> explicit direct-rendering intent:
+          #                             virpipe rasters client-side into SHM
+          #                             pixmaps via MIT-SHM/DRI3, which this X
+          #                             server implements
+          # shared-glapi OMITTED       -> see header: either linkage (embedded
+          #                             or rootfs-provided libglapi) is correct;
+          #                             the post-build gates handle both, and
+          #                             omitting dodges the deprecation/removal
+          #                             landmine
+          # -Ddri3 OMITTED            -> removed upstream as of 25.0.0;
+          #                             passing it fails `meson setup` outright
+          meson setup build \
+            --prefix=/output/usr \
+            --libdir=lib \
+            --buildtype=release \
+            -Db_ndebug=true \
+            -Dplatforms=x11 \
+            -Dgallium-drivers=virgl,softpipe \
+            -Dvulkan-drivers= \
+            -Dglx=xlib \
+            -Dglx-direct=true \
+            -Degl=disabled \
+            -Dgbm=disabled \
+            -Dopengl=true \
+            -Dgles1=disabled \
+            -Dgles2=disabled \
+            -Dllvm=disabled \
+            -Dshared-llvm=disabled \
+            -Dzstd=disabled \
+            -Dvalgrind=disabled \
+            -Dlibunwind=disabled \
+            -Dtools= \
+            -Dvulkan-layers=
+
+          echo "==> Building"
+          ninja -C build -j"$(nproc)"
+
+          echo "==> Installing to staging root"
+          ninja -C build install
+
+          echo "==> Locating build outputs"
+          LIBDIR="/output/usr/lib"
+          # The xlib libGL installs version-suffixed (e.g. libGL.so.1.5.0 on
+          # Mesa 26, libGL.so.1.7.0 on older majors); accept any suffix and
+          # ship it under the 1.7.0 name the rootfs libGL.so.1 symlink points
+          # at. SONAME stays libGL.so.1 either way (gated below), so the
+          # rename is filename-only and loader-safe -- same convention as the
+          # llvmpipe-opengl package.
+          GL_SRC="$(find "$LIBDIR" -maxdepth 1 -name 'libGL.so.*' -type f | sort -V | tail -n1)"
+          if [ -z "$GL_SRC" ] || [ ! -f "$GL_SRC" ]; then
+            echo "FATAL: no libGL.so.* produced by the xlib GLX target" >&2
+            exit 1
+          fi
+
+          echo "==> Asserting the baked gallium drivers are virpipe + softpipe (not llvmpipe)"
+          # GALLIUM_DRIVER=virpipe (set app-side) only resolves if virpipe is
+          # actually compiled into this libGL. A misconfigured gallium-drivers
+          # value would silently produce a libGL that loads yet serves no
+          # virpipe device -- the "driver not detected" signature. Fail here.
+          # softpipe must be present too: Mesa hard-requires it for the xlib
+          # target, and the proven virgl-23.1.9 asset carries exactly this
+          # virpipe + softpipe composition.
+          if ! grep -qa 'virpipe' "$GL_SRC"; then
+            echo "FATAL: virpipe not found in $GL_SRC -- gallium-drivers=virgl,softpipe did not take effect" >&2
+            exit 1
+          fi
+          if ! grep -qa 'softpipe' "$GL_SRC"; then
+            echo "FATAL: softpipe not found in $GL_SRC -- the xlib-GLX meson requirement is not satisfied" >&2
+            exit 1
+          fi
+          if grep -qa 'llvmpipe' "$GL_SRC"; then
+            echo "FATAL: llvmpipe found in $GL_SRC -- wrong gallium driver baked in" >&2
+            exit 1
+          fi
+          echo "virpipe + softpipe baked in OK"
+
+          echo "==> Assembling the archive frost-v3's extraction code expects"
+          # OpenGL slot "VirGL" extracts graphics_driver/virgl-<ver>.tzst
+          # into RootFS rootDir (<files>/rootfs). Single-file package, same
+          # shape as the current virgl-23.1.9.tzst (which contains exactly
+          # usr/lib/libGL.so.1.7.0).
+          rm -rf /pkg
+          mkdir -p /pkg/virgl/usr/lib
+
+          cp -a "$GL_SRC" /pkg/virgl/usr/lib/libGL.so.1.7.0
+
+          echo "==> Reporting libglapi linkage (informational -- rootfs provides it)"
+          # The 23.1.9 asset NEEDEDs libglapi.so.0 and resolves it from the
+          # base rootfs copy; Mesa 25 xlib may instead embed glapi (no NEEDED).
+          # Both are correct. libglapi is deliberately NEVER bundled here:
+          # shadowing the rootfs file could break the zink slot, which shares
+          # it. The CI gate below proves the rootfs copy satisfies the loader
+          # whenever the NEEDED entry is present.
+          if readelf -d /pkg/virgl/usr/lib/libGL.so.1.7.0 | grep -q 'NEEDED.*libglapi\.so\.0'; then
+            echo "libGL NEEDEDs libglapi.so.0 -> will resolve from base rootfs (same as virgl-23.1.9)"
+          else
+            echo "libGL has no libglapi NEEDED -> glapi embedded, fully self-contained"
+          fi
+
+          echo "==> Checking for further runtime deps missing from Winlator rootfs and bundling private copies if needed"
+          # Same self-healing technique as the llvmpipe workflow: detect from
+          # the produced binary instead of assuming. With llvm=disabled the
+          # static-LLVM fallout (libtinfo/libsensors) is not expected, but a
+          # toolchain surprise must not ship a dead driver; the X11 WSI deps
+          # below are the ones lavapipe proved missing from this rootfs
+          # (Turnip's freedreno WSI never needed them, which is why the gap
+          # stayed hidden). Their own transitive deps are only libc/libxcb,
+          # both in the rootfs, so no dep chain to chase.
+          # Deliberately NOT bundling libzstd.so.1 / libz / libdrm / libX11 /
+          # libglapi even if NEEDED: the base rootfs already ships copies (it
+          # ships a NEWER libzstd than jammy), and extracting ours would
+          # DOWNGRADE a rootfs file that is never restored on driver switch.
+          # The CI gate below proves each rootfs copy satisfies the loader.
+          mkdir -p /tmp/extra-libs
+          BUNDLE_DEPS="libtinfo.so.6|libtinfo6 libsensors.so.5|libsensors5 libxcb-xfixes.so.0|libxcb-xfixes0 libxshmfence.so.1|libxshmfence1 libxcb-keysyms.so.1|libxcb-keysyms1"
+          NEEDS_EXTRA=""
+          for spec in $BUNDLE_DEPS; do
+            SONAME="${spec%%|*}"; DEB="${spec##*|}"
+            SONAME_RE="$(echo "$SONAME" | sed 's/\./\\./g')"
+            if readelf -d /pkg/virgl/usr/lib/libGL.so.1.7.0 | grep -q "NEEDED.*${SONAME_RE}"; then
+              echo "$SONAME needed -- fetching $DEB for a private copy"
+              (cd /tmp/extra-libs && apt-get download "$DEB")
+              dpkg-deb -x /tmp/extra-libs/${DEB}_*.deb /tmp/extra-libs
+              SRC="$(find /tmp/extra-libs -name "$SONAME" | head -n1)" || true
+              if [ -z "$SRC" ]; then
+                echo "FATAL: $DEB .deb did not contain $SONAME" >&2
+                exit 1
+              fi
+              cp -L "$SRC" /pkg/virgl/usr/lib/"$SONAME"
+              NEEDS_EXTRA="$NEEDS_EXTRA $SONAME"
+            fi
+          done
+          EXTRA_N="$(echo "$NEEDS_EXTRA" | wc -w)"
+          echo "bundled extra deps:[$NEEDS_EXTRA ]"
+
+          echo "==> Verifying package file count"
+          VIRGL_COUNT="$(find /pkg/virgl -type f | wc -l)"
+          # Baseline is 1 file (the driver) plus one extra file for each dep
+          # conditionally bundled above.
+          VIRGL_EXPECTED=$((1 + EXTRA_N))
+          if [ "$VIRGL_COUNT" -ne "$VIRGL_EXPECTED" ]; then
+            echo "FATAL: virgl package expected ${VIRGL_EXPECTED} files, found ${VIRGL_COUNT}" >&2
+            find /pkg/virgl -type f >&2
+            exit 1
+          fi
+
+          echo "==> Packaging as .tzst archive"
+          cd /pkg/virgl
+          tar --zstd -cf "/artifacts/virgl-${MESA_VERSION}.tzst" $(find . -type f -printf '%P\n')
+          sha256sum "/artifacts/virgl-${MESA_VERSION}.tzst" \
+            > "/artifacts/virgl-${MESA_VERSION}.tzst.sha256"
+
+          echo "==> Contents:"
+          tar --zstd -tvf "/artifacts/virgl-${MESA_VERSION}.tzst"
+
+          echo "==> Asserting wire-compat markers in the shipped binary"
+          # VTEST_SOCKET_NAME is the env var the patched vtest winsys reads
+          # (the app sets it at the served socket path); VIRGL_SERVER_PATH is
+          # the legacy fallback for older app builds. If either string is
+          # gone, the patch above did not apply and no guest process could
+          # ever reach the host renderer.
+          if ! grep -qa 'VTEST_SOCKET_NAME' /pkg/virgl/usr/lib/libGL.so.1.7.0; then
+            echo "FATAL: VTEST_SOCKET_NAME missing from libGL -- wire-compat patch did not apply" >&2
+            exit 1
+          fi
+          if ! grep -qa 'VIRGL_SERVER_PATH' /pkg/virgl/usr/lib/libGL.so.1.7.0; then
+            echo "FATAL: VIRGL_SERVER_PATH fallback missing from libGL -- wire-compat patch did not apply" >&2
+            exit 1
+          fi
+          echo "wire-compat markers OK"
+
+          echo "==> Done"
+          ls -lh /artifacts
+          PART2_EOF
+          chmod +x "${{ github.workspace }}/build.sh"
+
+      - name: Build inside emulated aarch64 ubuntu:22.04 container
+        run: |
+          docker run --rm \
+            --platform linux/arm64 \
+            -e MESA_VERSION="${{ env.MESA_VERSION }}" \
+            -v "${{ github.workspace }}/build.sh:/build.sh:ro" \
+            -v "${{ github.workspace }}/patch-virgl.py:/patch-virgl.py:ro" \
+            -v "${{ github.workspace }}/artifacts:/artifacts" \
+            ubuntu:22.04 \
+            bash /build.sh
+
+      - name: Verify archive is well-formed and contains the mandatory file
+        run: |
+          VIRGL_FILE="artifacts/virgl-${{ env.MESA_VERSION }}.tzst"
+          test -s "$VIRGL_FILE"
+          zstd -t "$VIRGL_FILE"
+
+          # Entry counts are not fixed: support libs are bundled only if the
+          # produced binary actually needs them, so check for the MANDATORY
+          # file's presence instead of an exact count.
+          VIRGL_LISTING="$(tar --zstd -tf "$VIRGL_FILE")"
+
+          if ! echo "$VIRGL_LISTING" | grep -qx 'usr/lib/libGL.so.1.7.0'; then
+            echo "FATAL: virgl archive is missing usr/lib/libGL.so.1.7.0" >&2
+            echo "$VIRGL_LISTING" >&2
+            exit 1
+          fi
+
+          # VirGL is OpenGL-slot-only: the archive must NOT contain a Vulkan
+          # ICD manifest or lavapipe-style ICD .so. Either one would fight the
+          # Vulkan slot's own manifest under usr/share/vulkan/icd.d when both
+          # slots extract into the same rootDir.
+          if echo "$VIRGL_LISTING" | grep -q 'vulkan/icd.d\|libvulkan_'; then
+            echo "FATAL: virgl archive unexpectedly contains Vulkan ICD files" >&2
+            echo "$VIRGL_LISTING" >&2
+            exit 1
+          fi
+
+          echo "virgl archive OK: $(du -h "$VIRGL_FILE" | cut -f1)"
+          echo "$VIRGL_LISTING"
+
+      - name: Diagnose ABI compatibility of produced binary
+        run: |
+          mkdir -p /tmp/abi-check
+          tar --zstd -xf "artifacts/virgl-${{ env.MESA_VERSION }}.tzst" -C /tmp/abi-check
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu > /dev/null
+          f=/tmp/abi-check/usr/lib/libGL.so.1.7.0
+          echo "--- $f ---"
+          echo "File type / architecture (must be ARM aarch64):"
+          file "$f"
+          MACHINE="$(aarch64-linux-gnu-readelf -h "$f" | grep 'Machine:' || true)"
+          echo "$MACHINE"
+          if ! echo "$MACHINE" | grep -q 'AArch64'; then
+            echo "FATAL: $f is not an AArch64 binary -- the emulated arm64 build did not take effect" >&2
+            exit 1
+          fi
+          echo "NEEDED (runtime library dependencies):"
+          aarch64-linux-gnu-readelf -d "$f" | grep NEEDED || true
+          echo "SONAME:"
+          aarch64-linux-gnu-readelf -d "$f" | grep SONAME || true
+          echo "Max GLIBC symbol version required:"
+          aarch64-linux-gnu-objdump -T "$f" 2>/dev/null | grep -oP 'GLIBC_[0-9.]+' | sort -V -u | tail -1 || true
+          echo "Max GLIBCXX symbol version required:"
+          aarch64-linux-gnu-objdump -T "$f" 2>/dev/null | grep -oP 'GLIBCXX_[0-9.]+' | sort -V -u | tail -1 || true
+          if aarch64-linux-gnu-readelf -d "$f" | grep -qi 'NEEDED.*libLLVM'; then
+            echo "FATAL: $f still depends on a shared libLLVM -- -Dllvm=disabled did not take effect" >&2
+            exit 1
+          fi
+          # virpipe + softpipe proof: GALLIUM_DRIVER=virpipe (set app-side in
+          # the VIRGL branch) only resolves if virpipe is actually baked into
+          # this libGL. A wrong gallium-drivers value would load yet serve no
+          # virpipe device -- the "driver not detected" signature. softpipe
+          # is asserted too: Mesa hard-requires it for the xlib target and
+          # the proven virgl-23.1.9 asset carries exactly this composition.
+          if ! aarch64-linux-gnu-strings "$f" | grep -q 'virpipe'; then
+            echo "FATAL: virpipe not found in $f -- gallium-drivers=virgl,softpipe did not take effect; GALLIUM_DRIVER=virpipe would resolve nothing" >&2
+            exit 1
+          fi
+          if ! aarch64-linux-gnu-strings "$f" | grep -q 'softpipe'; then
+            echo "FATAL: softpipe not found in $f -- the xlib-GLX meson requirement is not satisfied" >&2
+            exit 1
+          fi
+          if aarch64-linux-gnu-strings "$f" | grep -q 'llvmpipe'; then
+            echo "FATAL: llvmpipe found in $f -- wrong gallium driver baked in" >&2
+            exit 1
+          fi
+          echo "virpipe + softpipe baked in OK"
+          # GLVND-split guard (same as the llvmpipe flow): frost-v3's OpenGL
+          # slot ships libGL.so.1.7.0 as a SINGLE self-contained file
+          # (glx=xlib bakes the gallium driver + glapi in). If a future
+          # Mesa/glvnd-header change silently turns libGL into a GLVND
+          # dispatcher, it would dlopen (NOT NEEDED -- invisible to the dep
+          # gate below) libGLX_mesa.so.0 / libGLdispatch.so.0 at runtime,
+          # files this project does NOT ship -- every GL client would then
+          # fail with blank GPU info while all other gates stay green (the
+          # exact "OpenGL not recognized" signature). Fail loudly here.
+          if aarch64-linux-gnu-readelf -d "$f" | grep -qi 'NEEDED.*libGLX_mesa\|NEEDED.*libGLdispatch'; then
+            echo "FATAL: libGL became a GLVND dispatcher (NEEDEDs libGLX_mesa/libGLdispatch) -- the single-file xlib assumption is broken; ship the split libs or force non-GLVND" >&2
+            exit 1
+          fi
+          if ! aarch64-linux-gnu-readelf --dyn-syms "$f" | grep -qE ' glXCreateContext( |$)'; then
+            echo "FATAL: libGL defines no glXCreateContext -- not a usable xlib GL provider" >&2
+            exit 1
+          fi
+          if ! aarch64-linux-gnu-readelf --dyn-syms "$f" | grep -qE ' glXMakeCurrent( |$)'; then
+            echo "FATAL: libGL defines no glXMakeCurrent -- not a usable xlib GL provider" >&2
+            exit 1
+          fi
+          # The base rootfs only ships a libGL.so.1 symlink (pointing at
+          # libGL.so.1.7.0); guests link DT_NEEDED libGL.so.1. If Mesa ever
+          # changes libGL's SONAME, our renamed file would stop satisfying
+          # the loader and every GL client would die -- fail loudly here.
+          if ! aarch64-linux-gnu-readelf -d "$f" | grep -q 'SONAME.*libGL\.so\.1'; then
+            echo "FATAL: libGL SONAME is not libGL.so.1 -- the rootfs libGL.so.1 symlink would dangle" >&2
+            exit 1
+          fi
+
+      - name: Gate runtime deps against rootfs inventory and shipped drivers
+        run: |
+          # Every NEEDED library of the new driver must be satisfiable
+          # on-device, otherwise dlopen fails and the driver is recognized
+          # nowhere (blank GPU info / instant app close) -- the exact symptom
+          # this gate exists to prevent. A dependency passes if EITHER:
+          #   (a) a private copy is bundled inside our own package (/pkg), OR
+          #   (b) a file of that basename exists in the base rootfs.tzst
+          #       (checked out with the repo -- plain 62MB file, no LFS), OR
+          #   (c) it is already NEEDED by one of the shipped, known-working
+          #       driver archives (turnip/vortek/zink/virgl/gladio), which
+          #       proves it loads in this rootfs even if the inventory check
+          #       below missed it (e.g. a lib provided outside usr/lib).
+          # Anything else fails LOUDLY here, naming the exact library, instead
+          # of shipping a dead driver. NOTE libglapi.so.0 passes via (b): the
+          # base rootfs ships it and the current virgl-23.1.9 asset already
+          # proves that copy satisfies a virgl libGL at runtime. It is
+          # deliberately never bundled (shadowing the rootfs file could break
+          # the zink slot, which shares it).
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu > /dev/null
+          # Resolve the assets dir: this workflow runs either directly in the
+          # winlator-app repo (assets at app/src/main/assets) or in the
+          # winlator-frost-v3 parent (app/ submodule mount, assets at
+          # app/app/src/main/assets).
+          ASSET_BASE=""
+          for cand in "app/src/main/assets" "app/app/src/main/assets"; do
+            if [ -f "$cand/rootfs.tzst" ]; then ASSET_BASE="$cand"; break; fi
+          done
+          if [ -z "$ASSET_BASE" ]; then
+            echo "FATAL: rootfs.tzst found under neither app/src/main/assets nor app/app/src/main/assets -- workspace top level:" >&2
+            ls -la >&2
+            exit 1
+          fi
+          echo "==> Asset base: $ASSET_BASE"
+          echo "==> Inventorying base rootfs libraries"
+          tar --zstd -tf "$ASSET_BASE/rootfs.tzst" | sed 's|.*/||' | sort -u > /tmp/rootfs-files.txt
+          wc -l /tmp/rootfs-files.txt
+          if [ ! -s /tmp/rootfs-files.txt ]; then
+            echo "FATAL: rootfs inventory is empty -- $ASSET_BASE/rootfs.tzst is unreadable" >&2
+            exit 1
+          fi
+          echo "==> Collecting NEEDED sets of shipped working drivers"
+          REFDIR=/tmp/ref-drivers
+          rm -rf "$REFDIR"; mkdir -p "$REFDIR"
+          for a in "$ASSET_BASE"/graphics_driver/turnip-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/vortek-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/zink-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/virgl-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/gladio-*.tzst; do
+            [ -f "$a" ] || continue
+            echo "  reference: $a"
+            tar --zstd -xf "$a" -C "$REFDIR"
+          done
+          aarch64-linux-gnu-readelf -d "$REFDIR"/usr/lib/*.so 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/' | sort -u > /tmp/ref-needed.txt
+          echo "Proven-loadable NEEDED set from shipped drivers:"
+          cat /tmp/ref-needed.txt
+          FAIL=0
+          f=/tmp/abi-check/usr/lib/libGL.so.1.7.0
+          echo "--- deps of $(basename "$f") ---"
+          for lib in $(aarch64-linux-gnu-readelf -d "$f" | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/'); do
+            if [ -f "/tmp/abi-check/usr/lib/$lib" ]; then
+              echo "  OK (bundled private copy): $lib"
+            elif grep -qx "$lib" /tmp/rootfs-files.txt; then
+              echo "  OK (in base rootfs): $lib"
+            elif grep -qx "$lib" /tmp/ref-needed.txt; then
+              echo "  OK (used by a shipped driver): $lib"
+            else
+              echo "  FATAL: $lib is NEEDED by $(basename "$f") but is NOT bundled, NOT in rootfs.tzst, and used by NO shipped driver -- dlopen will fail on-device" >&2
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+      - name: Upload driver artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: virgl-${{ env.MESA_VERSION }}-aarch64
+          path: |
+            artifacts/virgl-*.tzst
+            artifacts/virgl-*.tzst.sha256
+          if-no-files-found: error
+          retention-days: 30

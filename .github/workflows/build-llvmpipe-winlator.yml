@@ -1,0 +1,933 @@
+name: Build llvmpipe/lavapipe for Winlator Frost v3 (aarch64 glibc)
+
+# Produces TWO separate archives, matching exactly what this project's
+# XServerDisplayActivity.extractGraphicsDriverFiles() extracts -- it treats
+# the Vulkan renderer slot and OpenGL renderer slot as independently
+# selectable (Vulkan: Turnip/Vortek/LLVMPipe, OpenGL: Zink/VirGL/Gladio/LLVMPipe),
+# so it never extracts one combined archive:
+#   llvmpipe-vulkan-<version>.tzst
+#     usr/lib/libvulkan_lvp.so                    -> lavapipe Vulkan ICD driver
+#     usr/share/vulkan/icd.d/lvp_icd.aarch64.json -> Vulkan loader manifest
+#   llvmpipe-opengl-<version>.tzst
+#     usr/lib/libGL.so.1.7.0  -> llvmpipe, statically linked into classic
+#                                libGL (Xlib GLX target, NOT a separate
+#                                dri/*.so plugin; glapi is embedded, there is
+#                                no libglapi.so.0 NEEDED entry -- proven
+#                                correct for Mesa 26 xlib, see the shared-glapi
+#                                note below; the zink/virgl libglapi linkage
+#                                comes from older Mesa and does not transfer).
+#                                NOTE: Mesa 26 installs this file as
+#                                libGL.so.1.5.0; it is renamed to 1.7.0 here
+#                                because that is what the rootfs libGL.so.1
+#                                symlink points at. SONAME stays libGL.so.1
+#                                either way (gated below), so the rename is
+#                                filename-only and loader-safe.
+# Each archive may ALSO conditionally contain private bundled copies, added
+# automatically only if the produced binary actually links against them
+# (detected via readelf after the build):
+#   usr/lib/libtinfo.so.6, usr/lib/libsensors.so.5 (static-LLVM fallout), and
+#   usr/lib/libxcb-xfixes.so.0, usr/lib/libxshmfence.so.1,
+#   usr/lib/libxcb-keysyms.so.1 (Mesa X11 WSI deps that Winlator's rootfs does
+#   not ship -- Turnip's freedreno WSI never needed them, which is why the gap
+#   only shows with lavapipe; the CI gate proves each one against the
+#   rootfs.tzst inventory plus every shipped driver's NEEDED set).
+#
+# Frost-v3 integration (see GraphicsDrivers.LLVMPIPE, DefaultVersion.LLVMPIPE,
+# XServerDisplayActivity.extractGraphicsDriverFiles):
+#   - Vulkan slot "LLVMPipe" extracts
+#       assets/graphics_driver/llvmpipe-vulkan-<DefaultVersion.LLVMPIPE>.tzst
+#     into RootFS rootDir (<files>/rootfs). No GALLIUM_DRIVER override; the ICD
+#     manifest selects lavapipe -- and with the ICD dir wiped on every driver
+#     switch, lavapipe is the SOLE Vulkan device, so DXVK 2.4.1 selects it
+#     without any device filter (its SkipCpuDevices flag is set only when a
+#     non-CPU device is enumerated; verified in dxvk_instance.cpp source).
+#     Deliberately NO WSI env overrides (no MESA_VK_WSI_DEBUG, no
+#     MESA_VK_WSI_PRESENT_MODE): exact parity with the proven working
+#     llvmpipe integration, whose branch sets no Mesa env at all. lavapipe
+#     negotiates the WSI path itself against this X server's DRI3 1.2 +
+#     GetSupportedModifiers support; forcing the sw debug path instead
+#     bypasses exactly that negotiation and was observed to keep working
+#     enumeration paired with black frames.
+#   - OpenGL slot "LLVMPipe" extracts
+#       assets/graphics_driver/llvmpipe-opengl-<DefaultVersion.LLVMPIPE>.tzst
+#     into the same rootDir. Deliberately NO Mesa env overrides either (no
+#     GALLIUM_DRIVER -- llvmpipe is the only gallium driver compiled in, so
+#     the loader selects it unaided; no MESA_GL_VERSION_OVERRIDE -- the
+#     Mesa-dialect GLX served when mesaDriverMode is true accepts stock Mesa
+#     26's default 4.5-core context requests, so capping to 3.3 would only
+#     downgrade what Wine can use; no LIBGL_DRI3_DISABLE): same parity
+#     reasoning as the Vulkan slot. The Vulkan slot extracts first, then the
+#     OpenGL slot, so mixed combos (e.g. Turnip Vulkan + LLVMPipe OpenGL) end
+#     with the right libGL.
+#   - DefaultVersion.DXVK() treats llvmpipe like turnip (lavapipe exposes
+#     Vulkan 1.4 -> MAJOR_DXVK).
+#   - Place the two produced .tzst files under
+#       app/app/src/main/assets/graphics_driver/
+#     (aaptOptions already has noCompress for tzst, so no gradle change needed).
+#
+# Frost-v3 vs alexvorxx/winlator differences verified during the port:
+#   - RootFS layout: frost-v3 serves the guest FS from
+#       /data/data/com.winlator/files/rootfs   (RootFS.getRootDir(),
+#       RootFS.getLibDir() = <rootfs>/usr/lib)
+#     while alexvorxx/winlator serves it from
+#       /data/data/com.winlator/files/imagefs  (ImageFs.getRootDir()).
+#     The ICD library_path default below therefore points at the rootfs path,
+#     using the exact /lib/ prefix convention of both known-good reference
+#     manifests in this project (freedreno_icd.aarch64.json and
+#     vortek_icd.aarch64.json both use
+#     /data/data/com.winlator/files/rootfs/lib/<driver>.so). On the current
+#     rootfs <rootfs>/lib is a symlink to usr/lib (verified in rootfs.tzst),
+#     so /lib/ and /usr/lib/ resolve identically -- but matching the proven
+#     convention removes one more variable when the driver silently fails to
+#     enumerate.
+#     A manifest baked with the imagefs path would make the Vulkan loader look
+#     in a directory that does not exist on frost-v3, so lavapipe would
+#     silently never enumerate. This is the single most important frost-v3
+#     specific fix in this file.
+#   - Driver selection model: alexvorxx/winlator uses ONE combined
+#     graphicsDriver string ("llvmpipe", "turnip", ...) backed by a SINGLE
+#     combined llvmpipe-26.0.0.tzst archive containing both GL and Vulkan
+#     files. Frost-v3 uses TWO independent slots (vulkan,opengl), so the
+#     combined archive can never be extracted correctly here -- hence the two
+#     split archives this workflow produces, and the two LLVMPipe entries
+#     (one per slot) in GraphicsDrivers.getItems().
+#   - Env-var ownership: alexvorxx sets DXVK/VKD3D + vkbasalt + use_dri3 env
+#     inside its llvmpipe branch. In frost-v3, DXVK/VKD3D env is owned by
+#     extractDXWrapperFiles(), there is no use_dri3 preference (default
+#     behavior = DRI3 attempted, matching the reference default), no
+#     vkbasalt support, and the Mesa side sets nothing at all -- exact
+#     parity with the reference llvmpipe branch under default preferences.
+#   - X-server parity (the actual llvmpipe fix, 2026-09-11): alexvorxx's
+#     XServer serves a dual-personality GLX (ScreenInfo.mesaDriverMode,
+#     default true): the Mesa dialect -- rich FB-config catalog, ANY-version
+#     context creation with no host GL context, MakeCurrent/IsDirect/
+#     SwapBuffers/GetString/CreateWindow/SetClientInfo2 and friends -- for
+#     every Mesa-client driver, and the minimal host-GPU dialect (single FB
+#     config, <= 3.3 gate) only for Gladio (which explicitly opts out via
+#     setMesaDriverMode(false)). Frost-v3 previously served ONLY the Gladio
+#     dialect, so every Mesa GL client died on unimplemented opcodes or the
+#     version gate (blank GPUInfo / dead wined3d) -- no env override can fix
+#     a protocol the server does not speak. DRI3 1.2 + GetSupportedModifiers
+#     (zero modifiers = linear-only SHM presentation) were ported together
+#     for lavapipe's modifier-aware WSI.
+#   - Bug fix vs the draft this file was based on: the libsensors bundling
+#     copy for the opengl package was missing the filename join
+#     (destination was the directory plus a stray second operand), which would
+#     have dropped libsensors.so.5 into the container's working directory
+#     instead of the package whenever only the GL binary needed it. Fixed here.
+#
+# Design notes (inherited, still true):
+#   - Builds run INSIDE a real aarch64 container via QEMU user-mode emulation
+#     (docker/setup-qemu-action), not manual dpkg --add-architecture cross-compiling.
+#     This avoids "llvm-config is an arm64 ELF binary and can't run on the amd64
+#     runner" entirely, since under emulation it runs as a true native binary.
+#     QEMU fragility note: the emulated aarch64 ldconfig segfaults under some
+#     QEMU releases (binfmt qemu v10.2.3: two runs killed on 2026-09-07, dpkg
+#     exit 139 on libc-bin, apt exit 100). Defense in two layers: (1) build.sh
+#     replaces ldconfig with a no-op before any apt install -- the deterministic
+#     fix, safe because the build needs files on disk, not the ld.so cache
+#     (compiler/linker resolve via explicit -L paths; Android ignores the
+#     cache on-device); (2) every in-container apt-get install additionally
+#     passes -o Dpkg::Options::="--no-triggers" to dodge most trigger
+#     executions. Layer 2 alone proved insufficient: a large install still
+#     executes the libc-bin trigger pass at the end, so layer 1 carries it.
+#   - Base image is ubuntu:22.04 (jammy). jammy ships glibc 2.35 -- glibc is
+#     backward compatible (a 2.35-linked binary loads fine on a newer system,
+#     since 2.35's symbol versions are a strict subset), whereas building on
+#     ubuntu:24.04 (glibc 2.39) risks requiring symbol versions newer than the
+#     target rootfs provides. The ABI diagnostic step at the end prints the
+#     actual max GLIBC/GLIBCXX versions required so this can be re-checked if
+#     the rootfs glibc ever changes.
+#   - VERSION PIN (2026-09-13): defaults are Mesa 25.0.0 + LLVM 15, the
+#     contemporaneous (2025) pairing and the proven working llvmpipe
+#     combination (matches the reference llvmpipe-25.0.0 asset: Mesa 25.0.0
+#     with LLVM 15.0.7, whose binaries the app currently vendors). Do NOT
+#     bump to Mesa 26 + LLVM 22 without on-device proof: the in-house
+#     26.0.0/22.1.8 build enumerated correctly yet rendered clear-color
+#     only on GL and black on Vulkan (no geometry, zero errors from any
+#     layer) with server protocol and env verified byte-identical to the
+#     reference -- i.e. its shared llvmpipe rasterizer output nothing,
+#     plausibly misbuilt under QEMU user-mode CI. Revisit only with a
+#     natively-built, on-device-verified Mesa 26+ asset.
+#   - LLVM comes from apt.llvm.org (the flow also works for 15; jammy's own
+#     repos stop at LLVM 15, which is exactly the pinned major). The older
+#     note about Mesa 26 requiring LLVM 22 is kept for the record: building
+#     Mesa 26 against LLVM 15 -- seven majors behind -- produces binaries
+#     that enumerate and run yet render black on AArch64 (Mesa 26's reworked
+#     gallivm JIT IR miscompiles under the old backend). Same glibc-2.35
+#     baseline either way (apt.llvm.org builds target jammy), so the ABI
+#     story below is unchanged. If you override llvm_major, keep it within
+#     the Mesa major's supported LLVM range or `meson setup` will fail.
+#   - -Dshared-llvm=disabled is MANDATORY. Without it, Mesa links against the
+#     shared libLLVM-*.so provided by llvm-dev, and the rootfs does not ship
+#     that library at all -- so libGL/libvulkan_lvp fail to dlopen with a
+#     silent failure / blank GPU info. Statically linking LLVM's component
+#     libraries into the driver removes that runtime dependency entirely (at
+#     the cost of a much larger .so, which is expected and correct). Spelled
+#     `disabled`, not `false`: Mesa 26 deprecates the `false` value
+#     ("replaced by 'disabled'") and a removed alias would fail `meson setup`
+#     outright, the same way the removed `-Ddri3` option does.
+#   - llvm-config shim: llvm-config-<ver> --libs reports -lPolly/-lPollyISL,
+#     which distro llvm-dev packages do not ship, killing both final links.
+#     A /usr/local/bin shim strips those two exact flags (nothing in Mesa
+#     uses Polly); verified by a post-install assertion before meson runs.
+#   - -Dzstd=disabled: falls back to zlib for disk-cache compression. NOTE it
+#     does NOT remove the libzstd.so.1 runtime dependency: the statically
+#     linked LLVM component archives still have undefined zstd symbols, so the
+#     final link re-adds -lzstd (observed NEEDED on both produced .so files).
+#     It is deliberately NOT bundled: the base rootfs ships a NEWER libzstd
+#     (1.5.6 vs jammy's 1.4.8) and the CI gate proves that copy satisfies the
+#     loader -- bundling ours would downgrade a rootfs file with no restore
+#     path on driver switch. Same policy as libz/libdrm/libX11.
+#   - shared-glapi is DELIBERATELY NOT PASSED. Mesa 26 reports
+#     `DEPRECATION: Option "shared-glapi" is deprecated`, and the 2026-09-07
+#     run proved it is a no-op for the xlib target: even with
+#     -Dshared-glapi=enabled in the command line, the produced libGL carries
+#     NO libglapi.so.0 NEEDED entry -- the xlib libGL always embeds glapi.
+#     The zink/virgl libglapi linkage observed in this project comes from
+#     older Mesa releases and does not transfer to Mesa 26 (and the pinned
+#     Mesa 25 xlib target embeds glapi the same way); so the missing NEEDED
+#     entry is NOT the cause of blank GPU info (the app-side 3.3COMPAT
+#     version cap remains the operative GL fix). Passing a deprecated option
+#     is also a future landmine: once Mesa removes it, `meson setup` fails
+#     outright, exactly like the removed `-Ddri3` did -- so it is omitted
+#     rather than set to either value.
+#   - -Dglx-direct=true: explicit direct-rendering intent (client-side llvmpipe
+#     raster into SHM pixmaps via MIT-SHM, which this X server implements).
+#     This is the default, but spelling it out protects against a future Mesa
+#     default flip silently moving us to indirect protocol rendering.
+#   - glslang-tools is installed via apt for its runtime shared libs, but the
+#     glslangValidator BINARY it provides on jammy may be too old for the
+#     pinned Mesa's hard minimum (this note was written for Mesa 26.x's
+#     `glslang >= 12.2`). A current glslangValidator is built from upstream
+#     source via its own CMake+Ninja flow and installed to /usr/local/bin
+#     (ahead of /usr/bin on PATH) under the "glslangValidator" filename
+#     Mesa's meson.build actually searches for; a newer validator also
+#     satisfies older Mesa minimums, so the flow stays correct if the pin
+#     moves within the v25-v26 range.
+#   - -Dglx=xlib is the key option: it embeds the llvmpipe gallium driver
+#     directly into libGL.so instead of producing a separate loadable
+#     dri/swrast_dri.so, which is what lets the final package be a single
+#     self-contained libGL file with no DRI search-path plumbing needed.
+#   - -Ddri3 does NOT exist as a meson option in Mesa 26.x (removed upstream
+#     as of 25.0.0). Do not re-add it: `meson setup` fails outright with
+#     "Unknown option: dri3".
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_version:
+        description: "Mesa version to build (must exist as mesa-<ver>.tar.xz on archive.mesa3d.org)"
+        required: true
+        default: "25.0.0"
+      llvm_major:
+        description: "LLVM major version to build against (default 15: contemporaneous with Mesa 25 -- the proven working llvmpipe pairing; jammy ships it natively)"
+        required: true
+        default: "15"
+      vulkan_api_version:
+        description: "api_version field written into the lavapipe ICD json"
+        required: true
+        default: "1.4.305"
+      icd_library_path:
+        description: "Absolute library_path baked into the ICD json (must match where frost-v3 extracts libvulkan_lvp.so on-device: <files>/rootfs/usr/lib, written with the /lib/ prefix convention of the turnip/vortek reference manifests)"
+        required: true
+        default: "/data/data/com.winlator/files/rootfs/lib/libvulkan_lvp.so"
+
+env:
+  MESA_VERSION: ${{ github.event.inputs.mesa_version || '25.0.0' }}
+  LLVM_MAJOR: ${{ github.event.inputs.llvm_major || '15' }}
+  VULKAN_API_VERSION: ${{ github.event.inputs.vulkan_api_version || '1.4.305' }}
+  ICD_LIBRARY_PATH: ${{ github.event.inputs.icd_library_path || '/data/data/com.winlator/files/rootfs/lib/libvulkan_lvp.so' }}
+  TARGET_TRIPLE: aarch64-linux-gnu
+
+jobs:
+  build-llvmpipe-lavapipe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Mandatory: registers binfmt_misc handlers so the amd64 runner can
+      # execute aarch64 ELF binaries transparently. Without this every
+      # command inside --platform=linux/arm64 below fails with "exec format error".
+      - name: Set up QEMU (aarch64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create output directory
+        run: mkdir -p "${{ github.workspace }}/artifacts"
+
+      - name: Write in-container build script
+        run: |
+          cat > "${{ github.workspace }}/build.sh" <<'BUILD_SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          MESA_VERSION="${MESA_VERSION:?}"
+          LLVM_MAJOR="${LLVM_MAJOR:?}"
+          VULKAN_API_VERSION="${VULKAN_API_VERSION:?}"
+          ICD_LIBRARY_PATH="${ICD_LIBRARY_PATH:?}"
+
+          echo "==> Neutralizing ldconfig inside the emulated container"
+          # DETERMINISTIC fix for the QEMU user-mode ldconfig SIGSEGV. The
+          # emulated aarch64 ldconfig segfaults under QEMU (2026-09-07 runs,
+          # binfmt qemu v10.2.3: "qemu: uncaught target signal 11", dpkg exit
+          # 139 on libc-bin, apt exit 100). -o Dpkg::Options::="--no-triggers"
+          # on the installs below dodges most trigger executions (it got the
+          # bootstrap install past its crash point), but the second run proved
+          # a large install STILL executes the libc-bin trigger pass at the
+          # end -- trigger-skipping alone is not sufficient. Replacing ldconfig
+          # with a no-op removes the crashing binary from the equation
+          # entirely, and it is safe: this build only needs files/headers/
+          # binaries on disk (compiler and linker resolve via explicit -L
+          # paths from llvm-config/pkg-config, never via the ld.so cache),
+          # and nothing on-device uses ld.so.cache either (the Android linker
+          # ignores it). The container is ephemeral (docker run --rm), so no
+          # restore is needed.
+          if LDCONFIG_PATH="$(command -v ldconfig)"; then
+            mv "$LDCONFIG_PATH" "${LDCONFIG_PATH}.qemu-broken"
+            printf '#!/bin/sh\nexit 0\n' > "$LDCONFIG_PATH"
+            chmod +x "$LDCONFIG_PATH"
+            echo "ldconfig neutralized at ${LDCONFIG_PATH}"
+          fi
+
+          echo "==> Updating apt and installing bootstrap tools"
+          apt-get update
+          echo "==> Confirming base image glibc version"
+          ldd --version | head -n1 || true
+          # Bare ubuntu:22.04 ships neither curl nor gnupg; both are needed
+          # before the LLVM repo below can be added (HTTPS key download).
+          # -o Dpkg::Options::="--no-triggers" is MANDATORY under QEMU
+          # user-mode emulation: dpkg's libc-bin trigger executes the emulated
+          # aarch64 ldconfig, which segfaults under QEMU (observed 2026-09-07
+          # with binfmt qemu v10.2.3: "qemu: uncaught target signal 11",
+          # dpkg exit 139, apt exit 100 -- killing the run in this very first
+          # install, before any Mesa code runs). Skipping trigger processing
+          # is safe here: this build only needs files/headers/binaries on disk
+          # (llvm-config and pkg-config resolve via explicit paths, not the
+          # ld.so cache), and nothing on-device uses ld.so.cache either (the
+          # Android linker ignores it). A best-effort `ldconfig || true` after
+          # the installs below refreshes the cache when the emulator can.
+          apt-get -o Dpkg::Options::="--no-triggers" install -y --no-install-recommends ca-certificates curl gnupg
+          echo "==> Adding apt.llvm.org for LLVM ${LLVM_MAJOR}"
+          # jammy's own repos stop at LLVM 15, but Mesa 26's llvmpipe requires
+          # LLVM 22 (current BLFS requirement for the Mesa 26 family; LLVM 15
+          # is seven majors behind and its AArch64 JIT backend miscompiles
+          # Mesa 26 gallivm IR -- the prime suspect for rendered-black-screen
+          # with otherwise working DXVK). Same glibc-2.35 baseline either way.
+          # Retry loop: apt.llvm.org is intermittently unreachable from CI
+          # (2026-09-07 run: "curl: (7) Couldn't connect to server" while
+          # ports.ubuntu.com worked fine minutes earlier in the same run, and
+          # the key downloaded fine in earlier runs -- transient/server-side).
+          # pipefail propagates curl/gpg failures into the if-condition, which
+          # is exempt from set -e, so attempts retry instead of killing the run.
+          for i in 1 2 3 4 5; do
+            if curl -fsSL --retry 3 --retry-delay 10 --retry-all-errors \
+                https://apt.llvm.org/llvm-snapshot.gpg.key \
+                | gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg; then
+              echo "LLVM key downloaded (attempt ${i})"
+              break
+            fi
+            echo "WARNING: LLVM key download attempt ${i} failed, retrying..." >&2
+            sleep 15
+            if [ "${i}" = "5" ]; then
+              echo "FATAL: could not download LLVM key after 5 attempts" >&2
+              exit 1
+            fi
+          done
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-${LLVM_MAJOR} main" > /etc/apt/sources.list.d/llvm.list
+          echo "==> Updating apt (with LLVM repo) and installing mandatory build dependencies"
+          apt-get update
+          # Same --no-triggers hardening as the bootstrap install above: this
+          # large install re-triggers libc-bin (and man-db) many times, and any
+          # single emulated-ldconfig segfault fails the whole run (set -e).
+          apt-get -o Dpkg::Options::="--no-triggers" install -y --no-install-recommends \
+            ca-certificates curl xz-utils git \
+            build-essential pkg-config cmake ninja-build \
+            python3 python3-pip python3-setuptools python3-wheel \
+            python3-mako python3-yaml python3-ply \
+            bison flex \
+            zstd \
+            glslang-tools \
+            "llvm-${LLVM_MAJOR}-dev" "libclang-cpp${LLVM_MAJOR}-dev" clang-"${LLVM_MAJOR}" \
+            libzstd-dev zlib1g-dev libexpat1-dev libelf-dev \
+            libdrm-dev \
+            libx11-dev libxext-dev libxfixes-dev libxcb1-dev libxcb-glx0-dev \
+            libxcb-shm0-dev libxcb-dri2-0-dev libxcb-dri3-dev libxcb-present-dev \
+            libxcb-randr0-dev libxcb-sync-dev libxcb-xfixes0-dev \
+            libx11-xcb-dev libxcb-keysyms1-dev \
+            libxshmfence-dev libxxf86vm-dev libxrandr-dev
+          # Best-effort cache refresh; failure is tolerated (see above).
+          ldconfig || true
+
+          echo "==> Installing llvm-config shim (filter undistributed Polly libs)"
+          # llvm-config-<ver> --libs lists -lPolly/-lPollyISL as part of LLVM's
+          # static-link closure, but distro llvm-dev packages do not ship
+          # libPolly.a/libPollyISL.a, so both final links die with
+          # "cannot find -lPolly". Nothing in Mesa references Polly symbols
+          # (gallivm runs its own pass pipeline), so dropping those two exact
+          # flags is safe; a genuinely-needed Polly dep would fail instead
+          # with undefined Polly references. Shim lives in /usr/local/bin,
+          # ahead of /usr/bin on PATH; the real config is untouched.
+          # NOTE: inner heredoc delimiter is UNQUOTED so $LLVM_MAJOR expands
+          # now; \$@ stays literal so the shim receives its own arguments.
+          cat > /usr/local/bin/llvm-config-"$LLVM_MAJOR" <<SHIM_EOF
+          #!/usr/bin/env bash
+          exec /usr/bin/llvm-config-$LLVM_MAJOR "\$@" | tr ' ' '\n' | grep -v -x -e '-lPolly' -e '-lPollyISL' | tr '\n' ' '
+          SHIM_EOF
+          chmod +x /usr/local/bin/llvm-config-"$LLVM_MAJOR"
+          hash -r
+          echo "==> Verifying Polly flags are filtered"
+          if /usr/local/bin/llvm-config-"$LLVM_MAJOR" --libs 2>/dev/null | tr ' ' '\n' | grep -qx -e '-lPolly' -e '-lPollyISL'; then
+            echo "FATAL: llvm-config shim did not filter Polly flags" >&2
+            exit 1
+          fi
+          echo "Polly link flags filtered OK"
+
+          # Mesa 26.x needs a meson newer than what jammy packages, so pin a
+          # known-good modern meson via pip, installed straight into the
+          # system interpreter. Deliberately NOT using `python3 -m venv`,
+          # since that needs the separate python3.10-venv package
+          # (ensurepip) which isn't installed by default and would be one
+          # more thing to keep in sync.
+          echo "==> Installing pinned meson via pip (system interpreter)"
+          # Deliberately NOT running "pip install --upgrade pip" first: the
+          # apt-installed pip has no RECORD metadata (it's a dpkg-managed
+          # file set), so pip's self-uninstall step during an upgrade fails
+          # with "Cannot uninstall pip 22.0.2, RECORD file not found".
+          # Also deliberately NOT passing --break-system-packages: that flag
+          # only exists on pip 23.0.1+ (PEP 668 support), and jammy ships
+          # pip 22.0.2, which errors with "no such option" if you pass it.
+          # jammy has no PEP 668 "externally managed environment" guard in
+          # the first place, so a plain install is correct here.
+          python3 -m pip install "meson>=1.4,<2.0"
+          hash -r
+          meson --version
+
+          echo "==> Building glslangValidator from source"
+          # jammy's glslang-tools apt package satisfies availability but not
+          # Mesa 26.x's version floor (meson.build hard-requires >= 12.2;
+          # jammy's packaged build reports older than that). Building from
+          # upstream's own CMake+Ninja flow avoids both problems at once.
+          # Installing to /usr/local/bin means it's found ahead of the
+          # apt-provided /usr/bin/glslangValidator on PATH, so no need to
+          # uninstall the apt package.
+          git clone --depth 1 https://github.com/KhronosGroup/glslang.git /tmp/glslang
+          cd /tmp/glslang
+          python3 update_glslang_sources.py
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_CTEST=OFF \
+            -DSPIRV_SKIP_TESTS=ON \
+            -DSPIRV_SKIP_EXECUTABLES=ON \
+            -DENABLE_SPVREMAPPER=OFF \
+            -DENABLE_GLSLANG_BINARIES=ON
+          ninja -C build
+          # Upstream glslang renamed its standalone binary from
+          # "glslangValidator" to "glslang" some time ago, but Mesa's
+          # meson.build still specifically searches PATH for a program named
+          # "glslangValidator" -- so install under that name regardless of
+          # what the build actually produced.
+          GLSLANG_BIN="$(find build/StandAlone -maxdepth 1 -type f \( -name 'glslang' -o -name 'glslangValidator' \) | head -n1)" || true
+          if [ -z "$GLSLANG_BIN" ]; then
+            echo "FATAL: no glslang/glslangValidator binary found after build" >&2
+            find build/StandAlone -maxdepth 1 -type f >&2
+            exit 1
+          fi
+          install -Dm755 "$GLSLANG_BIN" /usr/local/bin/glslangValidator
+          cd / && rm -rf /tmp/glslang
+          hash -r
+          glslangValidator --version || true
+
+          echo "==> Fetching Mesa ${MESA_VERSION} source"
+          mkdir -p /build && cd /build
+          # Retry flags: same transient-network class that killed the
+          # 2026-09-07 run at the LLVM key download (curl exit 7 against one
+          # host while others worked). Zero behavior change on success.
+          curl -fL --retry 5 --retry-delay 15 --retry-all-errors \
+            -o "mesa-${MESA_VERSION}.tar.xz" \
+            "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz"
+          tar xf "mesa-${MESA_VERSION}.tar.xz"
+          cd "mesa-${MESA_VERSION}"
+
+          echo "==> Configuring build (single-file classic libGL + lavapipe ICD)"
+          # gallium-drivers=llvmpipe -> the only gallium driver being embedded
+          # vulkan-drivers=swrast    -> lavapipe Vulkan ICD (libvulkan_lvp.so)
+          # glx=xlib                 -> MANDATORY for a single self-contained
+          #                             libGL.so: bakes llvmpipe straight into
+          #                             libGL instead of a separate dri/*.so
+          #                             plugin loaded via DRI search path
+          # egl/gbm disabled          -> not part of the package frost-v3
+          #                             expects for this driver; omit to avoid
+          #                             producing files that won't be shipped
+          # llvm=enabled              -> mandatory: llvmpipe JITs shaders via LLVM
+          # shared-glapi OMITTED       -> deprecated no-op for the xlib target
+          #                             in Mesa 26 (glapi is always embedded;
+          #                             see design note above). Omitted rather
+          #                             than set, so a future removal of the
+          #                             option cannot break `meson setup`.
+          # shared-llvm=disabled      -> static LLVM link (see design note);
+          #                             spelled `disabled`: the `false` value
+          #                             is deprecated and its future removal
+          #                             would break `meson setup` outright.
+          # glx-direct=true           -> explicit direct-rendering intent: llvmpipe
+          #                             rasters client-side into SHM pixmaps via
+          #                             MIT-SHM, which this X server implements.
+          meson setup build \
+            --prefix=/output/usr \
+            --libdir=lib \
+            --buildtype=release \
+            -Db_ndebug=true \
+            -Dplatforms=x11 \
+            -Dgallium-drivers=llvmpipe \
+            -Dvulkan-drivers=swrast \
+            -Dglx=xlib \
+            -Dglx-direct=true \
+            -Degl=disabled \
+            -Dgbm=disabled \
+            -Dopengl=true \
+            -Dgles1=disabled \
+            -Dgles2=disabled \
+            -Dllvm=enabled \
+            -Dshared-llvm=disabled \
+            -Dzstd=disabled \
+            -Dvalgrind=disabled \
+            -Dlibunwind=disabled \
+            -Dtools= \
+            -Dvulkan-layers=
+
+          echo "==> Building"
+          ninja -C build -j"$(nproc)"
+
+          echo "==> Installing to staging root"
+          ninja -C build install
+
+          echo "==> Locating build outputs"
+          LIBDIR="/output/usr/lib"
+          # Mesa 26 installs the xlib libGL as libGL.so.1.5.0 (not 1.7.0);
+          # the find below accepts any libGL.so.* and the cp afterwards ships
+          # it under the 1.7.0 name the rootfs libGL.so.1 symlink points at.
+          # SONAME is libGL.so.1 either way (gated below), so the rename is
+          # filename-only and loader-safe.
+          GL_SRC="$(find "$LIBDIR" -maxdepth 1 -name 'libGL.so.*' -type f | sort -V | tail -n1)"
+          VK_SRC="${LIBDIR}/libvulkan_lvp.so"
+          ICD_SRC="$(find /output -path '*/share/vulkan/icd.d/*.json' | head -n1)" || true
+
+          if [ -z "$GL_SRC" ] || [ ! -f "$GL_SRC" ]; then
+            echo "FATAL: no libGL.so.* produced by the xlib GLX target" >&2
+            exit 1
+          fi
+          if [ ! -f "$VK_SRC" ]; then
+            echo "FATAL: libvulkan_lvp.so was not produced" >&2
+            exit 1
+          fi
+          if [ -z "$ICD_SRC" ]; then
+            echo "FATAL: lavapipe ICD manifest was not produced" >&2
+            exit 1
+          fi
+
+          echo "==> Assembling the two separate archives frost-v3's extraction code expects"
+          # XServerDisplayActivity.extractGraphicsDriverFiles() extracts the
+          # Vulkan slot and OpenGL slot as two INDEPENDENT archives (frost-v3
+          # lets Vulkan and OpenGL renderers be picked independently, e.g.
+          # Turnip for Vulkan + LLVMPipe for OpenGL). A single combined
+          # archive (like alexvorxx/winlator's llvmpipe-<ver>.tzst) is never
+          # extracted by that code at all. The Vulkan slot extracts
+          #   graphics_driver/llvmpipe-vulkan-<ver>.tzst
+          # and the OpenGL slot extracts
+          #   graphics_driver/llvmpipe-opengl-<ver>.tzst
+          # into RootFS rootDir (<files>/rootfs).
+          rm -rf /pkg
+          mkdir -p /pkg/vulkan/usr/lib /pkg/vulkan/usr/share/vulkan/icd.d
+          mkdir -p /pkg/opengl/usr/lib
+
+          cp -a "$GL_SRC" /pkg/opengl/usr/lib/libGL.so.1.7.0
+          cp -a "$VK_SRC" /pkg/vulkan/usr/lib/libvulkan_lvp.so
+
+          echo "==> Checking for libtinfo/libsensors and bundling private copies if needed"
+          # Rather than guess whether OUR specific build actually links
+          # against either one (a different llvmpipe build might have for
+          # different reasons -- e.g. a differently-configured static LLVM),
+          # detect it directly from the produced binaries and, if so, bundle
+          # a private copy alongside our own driver files. This is safe
+          # because our own .so files are necessarily already being found on
+          # the library search path covering wherever these archives get
+          # extracted to -- co-locating a private copy of a missing
+          # dependency there is a standard, well-established technique.
+          mkdir -p /tmp/extra-libs
+          NEEDS_TINFO_GL=0; NEEDS_TINFO_VK=0
+          NEEDS_SENSORS_GL=0; NEEDS_SENSORS_VK=0
+          if readelf -d /pkg/opengl/usr/lib/libGL.so.1.7.0 | grep -q 'NEEDED.*libtinfo\.so\.6'; then
+            NEEDS_TINFO_GL=1
+          fi
+          if readelf -d /pkg/vulkan/usr/lib/libvulkan_lvp.so | grep -q 'NEEDED.*libtinfo\.so\.6'; then
+            NEEDS_TINFO_VK=1
+          fi
+          if readelf -d /pkg/opengl/usr/lib/libGL.so.1.7.0 | grep -q 'NEEDED.*libsensors\.so\.5'; then
+            NEEDS_SENSORS_GL=1
+          fi
+          if readelf -d /pkg/vulkan/usr/lib/libvulkan_lvp.so | grep -q 'NEEDED.*libsensors\.so\.5'; then
+            NEEDS_SENSORS_VK=1
+          fi
+
+          echo "libGL needs libtinfo: ${NEEDS_TINFO_GL}, libsensors: ${NEEDS_SENSORS_GL}"
+          echo "libvulkan_lvp needs libtinfo: ${NEEDS_TINFO_VK}, libsensors: ${NEEDS_SENSORS_VK}"
+
+          if [ "$NEEDS_TINFO_GL" = "1" ] || [ "$NEEDS_TINFO_VK" = "1" ]; then
+            apt-get download libtinfo6
+            dpkg-deb -x libtinfo6_*.deb /tmp/extra-libs
+            TINFO_SRC="$(find /tmp/extra-libs -name 'libtinfo.so.6' | head -n1)" || true
+            if [ -z "$TINFO_SRC" ]; then
+              echo "FATAL: libtinfo6 .deb did not contain libtinfo.so.6" >&2
+              exit 1
+            fi
+            if [ "$NEEDS_TINFO_GL" = "1" ]; then
+              cp -L "$TINFO_SRC" /pkg/opengl/usr/lib/libtinfo.so.6
+            fi
+            if [ "$NEEDS_TINFO_VK" = "1" ]; then
+              cp -L "$TINFO_SRC" /pkg/vulkan/usr/lib/libtinfo.so.6
+            fi
+          fi
+
+          if [ "$NEEDS_SENSORS_GL" = "1" ] || [ "$NEEDS_SENSORS_VK" = "1" ]; then
+            apt-get download libsensors5
+            dpkg-deb -x libsensors5_*.deb /tmp/extra-libs
+            SENSORS_SRC="$(find /tmp/extra-libs -name 'libsensors.so.5' | head -n1)" || true
+            if [ -z "$SENSORS_SRC" ]; then
+              echo "FATAL: libsensors5 .deb did not contain libsensors.so.5" >&2
+              exit 1
+            fi
+            if [ "$NEEDS_SENSORS_GL" = "1" ]; then
+              cp -L "$SENSORS_SRC" /pkg/opengl/usr/lib/libsensors.so.5
+            fi
+            if [ "$NEEDS_SENSORS_VK" = "1" ]; then
+              cp -L "$SENSORS_SRC" /pkg/vulkan/usr/lib/libsensors.so.5
+            fi
+          fi
+
+          echo "==> Checking for further X11 WSI deps missing from Winlator rootfs and bundling private copies if needed"
+          # Mesa's X11 WSI links three more libs that Winlator's rootfs does
+          # not ship. Proven by the CI gate (NEEDED checked against the
+          # rootfs.tzst inventory plus every shipped driver's NEEDED set):
+          #   libxcb-xfixes.so.0  (package libxcb-xfixes0)
+          #   libxshmfence.so.1   (package libxshmfence1)
+          #   libxcb-keysyms.so.1 (package libxcb-keysyms1)
+          # Same private-copy technique as above. Their own transitive deps
+          # are only libc/libxcb, both in the rootfs, so no dep chain to chase.
+          # (Turnip's freedreno WSI does not pull these in, which is why the
+          # shipped drivers never exposed the gap.)
+          # Deliberately NOT bundling libzstd.so.1 even though both binaries
+          # NEEDED it: the base rootfs already ships a NEWER copy (1.5.6 vs
+          # jammy's 1.4.8), and extracting our older copy would DOWNGRADE a
+          # rootfs file that is never restored on driver switch. The CI gate
+          # below proves the rootfs copy satisfies the loader, like libz,
+          # libdrm and libX11 which are likewise rootfs-provided, never
+          # bundled.
+          BUNDLE_DEPS="libxcb-xfixes.so.0|libxcb-xfixes0 libxshmfence.so.1|libxshmfence1 libxcb-keysyms.so.1|libxcb-keysyms1"
+          NEEDS_EXTRA_VK=""; NEEDS_EXTRA_GL=""
+          for spec in $BUNDLE_DEPS; do
+            SONAME="${spec%%|*}"; DEB="${spec##*|}"
+            SONAME_RE="$(echo "$SONAME" | sed 's/\./\\./g')"
+            NEED_VK=0; NEED_GL=0
+            if readelf -d /pkg/vulkan/usr/lib/libvulkan_lvp.so | grep -q "NEEDED.*${SONAME_RE}"; then NEED_VK=1; fi
+            if readelf -d /pkg/opengl/usr/lib/libGL.so.1.7.0 | grep -q "NEEDED.*${SONAME_RE}"; then NEED_GL=1; fi
+            if [ "$NEED_VK" = "1" ] || [ "$NEED_GL" = "1" ]; then
+              echo "$SONAME needed (vulkan=$NEED_VK opengl=$NEED_GL) -- fetching $DEB"
+              (cd /tmp/extra-libs && apt-get download "$DEB")
+              dpkg-deb -x /tmp/extra-libs/${DEB}_*.deb /tmp/extra-libs
+              SRC="$(find /tmp/extra-libs -name "$SONAME" | head -n1)" || true
+              if [ -z "$SRC" ]; then
+                echo "FATAL: $DEB .deb did not contain $SONAME" >&2
+                exit 1
+              fi
+              if [ "$NEED_VK" = "1" ]; then
+                cp -L "$SRC" /pkg/vulkan/usr/lib/"$SONAME"
+                NEEDS_EXTRA_VK="$NEEDS_EXTRA_VK $SONAME"
+              fi
+              if [ "$NEED_GL" = "1" ]; then
+                cp -L "$SRC" /pkg/opengl/usr/lib/"$SONAME"
+                NEEDS_EXTRA_GL="$NEEDS_EXTRA_GL $SONAME"
+              fi
+            fi
+          done
+          EXTRA_VK_N="$(echo "$NEEDS_EXTRA_VK" | wc -w)"
+          EXTRA_GL_N="$(echo "$NEEDS_EXTRA_GL" | wc -w)"
+          echo "bundled extra WSI deps: vulkan[$NEEDS_EXTRA_VK ] opengl[$NEEDS_EXTRA_GL ]"
+
+          cat > /pkg/vulkan/usr/share/vulkan/icd.d/lvp_icd.aarch64.json <<EOF
+          {
+              "ICD": {
+                  "api_version": "${VULKAN_API_VERSION}",
+                  "library_path": "${ICD_LIBRARY_PATH}"
+              },
+              "file_format_version": "1.0.0"
+          }
+          EOF
+
+          echo "==> Verifying each package's file count"
+          VK_COUNT="$(find /pkg/vulkan -type f | wc -l)"
+          GL_COUNT="$(find /pkg/opengl -type f | wc -l)"
+          # Baseline is 2 files for vulkan (driver + icd json), 1 for opengl
+          # (driver), plus one extra file for each of libtinfo/libsensors and
+          # each extra X11 WSI dep that got conditionally bundled above.
+          VK_EXPECTED=$((2 + NEEDS_TINFO_VK + NEEDS_SENSORS_VK + EXTRA_VK_N))
+          GL_EXPECTED=$((1 + NEEDS_TINFO_GL + NEEDS_SENSORS_GL + EXTRA_GL_N))
+          if [ "$VK_COUNT" -ne "$VK_EXPECTED" ]; then
+            echo "FATAL: vulkan package expected ${VK_EXPECTED} files, found ${VK_COUNT}" >&2
+            find /pkg/vulkan -type f >&2
+            exit 1
+          fi
+          if [ "$GL_COUNT" -ne "$GL_EXPECTED" ]; then
+            echo "FATAL: opengl package expected ${GL_EXPECTED} files, found ${GL_COUNT}" >&2
+            find /pkg/opengl -type f >&2
+            exit 1
+          fi
+
+          echo "==> Packaging as two .tzst archives"
+          cd /pkg/vulkan
+          tar --zstd -cf "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst" $(find . -type f -printf '%P\n')
+          sha256sum "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst" \
+            > "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst.sha256"
+
+          cd /pkg/opengl
+          tar --zstd -cf "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst" $(find . -type f -printf '%P\n')
+          sha256sum "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst" \
+            > "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst.sha256"
+
+          echo "==> Contents of both archives:"
+          tar --zstd -tvf "/artifacts/llvmpipe-vulkan-${MESA_VERSION}.tzst"
+          tar --zstd -tvf "/artifacts/llvmpipe-opengl-${MESA_VERSION}.tzst"
+
+          echo "==> Done"
+          ls -lh /artifacts
+          BUILD_SCRIPT
+          chmod +x "${{ github.workspace }}/build.sh"
+
+      - name: Build inside emulated aarch64 ubuntu:22.04 container
+        run: |
+          docker run --rm \
+            --platform linux/arm64 \
+            -e MESA_VERSION="${{ env.MESA_VERSION }}" \
+            -e LLVM_MAJOR="${{ env.LLVM_MAJOR }}" \
+            -e VULKAN_API_VERSION="${{ env.VULKAN_API_VERSION }}" \
+            -e ICD_LIBRARY_PATH="${{ env.ICD_LIBRARY_PATH }}" \
+            -v "${{ github.workspace }}/build.sh:/build.sh:ro" \
+            -v "${{ github.workspace }}/artifacts:/artifacts" \
+            ubuntu:22.04 \
+            bash /build.sh
+
+      - name: Verify both archives are well-formed and contain the mandatory files
+        run: |
+          VK_FILE="artifacts/llvmpipe-vulkan-${{ env.MESA_VERSION }}.tzst"
+          GL_FILE="artifacts/llvmpipe-opengl-${{ env.MESA_VERSION }}.tzst"
+          for FILE in "$VK_FILE" "$GL_FILE"; do
+            test -s "$FILE"
+            zstd -t "$FILE"
+          done
+
+          # Entry counts are no longer fixed: the build script conditionally
+          # bundles libtinfo.so.6 and/or libsensors.so.5 alongside the driver
+          # if (and only if) the produced binary actually needs them, so a
+          # vulkan archive can legitimately have 2, 3, or 4 entries (driver +
+          # icd json + 0-2 bundled deps), and opengl 1, 2, or 3. Check for the
+          # MANDATORY files' presence instead of an exact count.
+          VK_LISTING="$(tar --zstd -tf "$VK_FILE")"
+          GL_LISTING="$(tar --zstd -tf "$GL_FILE")"
+
+          if ! echo "$VK_LISTING" | grep -qx 'usr/lib/libvulkan_lvp.so'; then
+            echo "FATAL: vulkan archive is missing usr/lib/libvulkan_lvp.so" >&2
+            echo "$VK_LISTING" >&2
+            exit 1
+          fi
+          if ! echo "$VK_LISTING" | grep -qx 'usr/share/vulkan/icd.d/lvp_icd.aarch64.json'; then
+            echo "FATAL: vulkan archive is missing the ICD json" >&2
+            echo "$VK_LISTING" >&2
+            exit 1
+          fi
+          if ! echo "$GL_LISTING" | grep -qx 'usr/lib/libGL.so.1.7.0'; then
+            echo "FATAL: opengl archive is missing usr/lib/libGL.so.1.7.0" >&2
+            echo "$GL_LISTING" >&2
+            exit 1
+          fi
+
+          # The ICD manifest must point at frost-v3's rootfs lib dir with the
+          # /lib/ prefix convention of the turnip/vortek reference manifests,
+          # NOT alexvorxx/winlator's imagefs path -- otherwise the Vulkan
+          # loader looks in a nonexistent directory and lavapipe never
+          # enumerates (blank GPU info). (<rootfs>/lib symlinks to usr/lib,
+          # where the archive actually extracts the .so, so both spellings
+          # resolve -- but the /lib/ spelling is what is proven to work.)
+          mkdir -p /tmp/icd-check
+          tar --zstd -xf "$VK_FILE" -C /tmp/icd-check usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          echo "ICD manifest content:"
+          cat /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+          if ! grep -q '"library_path": "/data/data/com.winlator/files/rootfs/lib/libvulkan_lvp.so"' /tmp/icd-check/usr/share/vulkan/icd.d/lvp_icd.aarch64.json; then
+            echo "WARNING: ICD library_path is not the frost-v3 rootfs path -- check icd_library_path input" >&2
+          fi
+
+          echo "vulkan archive OK: $(du -h "$VK_FILE" | cut -f1)"
+          echo "$VK_LISTING"
+          echo "opengl archive OK: $(du -h "$GL_FILE" | cut -f1)"
+          echo "$GL_LISTING"
+
+      - name: Diagnose ABI compatibility of produced binaries
+        run: |
+          mkdir -p /tmp/abi-check
+          tar --zstd -xf "artifacts/llvmpipe-vulkan-${{ env.MESA_VERSION }}.tzst" -C /tmp/abi-check
+          tar --zstd -xf "artifacts/llvmpipe-opengl-${{ env.MESA_VERSION }}.tzst" -C /tmp/abi-check
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu > /dev/null
+          for f in /tmp/abi-check/usr/lib/libvulkan_lvp.so /tmp/abi-check/usr/lib/libGL.so.1.7.0; do
+            [ -f "$f" ] || continue
+            echo "--- $f ---"
+            echo "File type / architecture (must be ARM aarch64):"
+            file "$f"
+            MACHINE="$(aarch64-linux-gnu-readelf -h "$f" | grep 'Machine:' || true)"
+            echo "$MACHINE"
+            if ! echo "$MACHINE" | grep -q 'AArch64'; then
+              echo "FATAL: $f is not an AArch64 binary -- the emulated arm64 build did not take effect" >&2
+              exit 1
+            fi
+            echo "NEEDED (runtime library dependencies):"
+            aarch64-linux-gnu-readelf -d "$f" | grep NEEDED || true
+            echo "SONAME:"
+            aarch64-linux-gnu-readelf -d "$f" | grep SONAME || true
+            echo "Max GLIBC symbol version required:"
+            aarch64-linux-gnu-objdump -T "$f" 2>/dev/null | grep -oP 'GLIBC_[0-9.]+' | sort -V -u | tail -1 || true
+            echo "Max GLIBCXX symbol version required:"
+            aarch64-linux-gnu-objdump -T "$f" 2>/dev/null | grep -oP 'GLIBCXX_[0-9.]+' | sort -V -u | tail -1 || true
+            if aarch64-linux-gnu-readelf -d "$f" | grep -qi 'NEEDED.*libLLVM'; then
+              echo "FATAL: $f still depends on a shared libLLVM -- -Dshared-llvm=disabled did not take effect" >&2
+              exit 1
+            fi
+            echo ""
+          done
+          # NOTE (no gate here -- deliberately): libGL carries NO libglapi.so.0
+          # NEEDED entry, and that is CORRECT for Mesa 26 xlib. The 2026-09-07
+          # run proved -Dshared-glapi=enabled is a deprecated no-op for the
+          # xlib target (meson prints the deprecation, then embeds glapi
+          # anyway), so a "must NEEDED libglapi" gate fails every build -- it
+          # did exactly that. The zink/virgl libglapi linkage comes from older
+          # Mesa and does not transfer. Do NOT re-add a libglapi gate.
+          # GLVND-split guard: frost-v3's OpenGL slot ships libGL.so.1.7.0 as
+          # a SINGLE self-contained file (glx=xlib bakes llvmpipe + glapi in;
+          # verified on the 26.0.0 asset: 70+ glX symbols in dynsym, no GLVND
+          # NEEDED entries). If a future Mesa/glvnd-header change silently
+          # turns libGL into a GLVND dispatcher, it would dlopen (NOT NEEDED
+          # -- invisible to the dep gate below) libGLX_mesa.so.0 /
+          # libGLdispatch.so.0 at runtime, files this project does NOT ship
+          # -- every GL client would then fail with blank GPU info while all
+          # other gates stay green (the exact "OpenGL not recognized"
+          # signature). Fail loudly here.
+          if aarch64-linux-gnu-readelf -d /tmp/abi-check/usr/lib/libGL.so.1.7.0 | grep -qi 'NEEDED.*libGLX_mesa\|NEEDED.*libGLdispatch'; then
+            echo "FATAL: libGL became a GLVND dispatcher (NEEDEDs libGLX_mesa/libGLdispatch) -- the single-file xlib assumption is broken; ship the split libs or force non-GLVND" >&2
+            exit 1
+          fi
+          if ! aarch64-linux-gnu-readelf --dyn-syms /tmp/abi-check/usr/lib/libGL.so.1.7.0 | grep -qE ' glXCreateContext( |$)'; then
+            echo "FATAL: libGL defines no glXCreateContext -- not a usable xlib GL provider" >&2
+            exit 1
+          fi
+          if ! aarch64-linux-gnu-readelf --dyn-syms /tmp/abi-check/usr/lib/libGL.so.1.7.0 | grep -qE ' glXMakeCurrent( |$)'; then
+            echo "FATAL: libGL defines no glXMakeCurrent -- not a usable xlib GL provider" >&2
+            exit 1
+          fi
+          # The base rootfs only ships a libGL.so.1 symlink (pointing at
+          # libGL.so.1.7.0); guests link DT_NEEDED libGL.so.1. If Mesa ever
+          # changes libGL's SONAME, our renamed file would stop satisfying
+          # the loader and every GL client would die -- fail loudly here.
+          if ! aarch64-linux-gnu-readelf -d /tmp/abi-check/usr/lib/libGL.so.1.7.0 | grep -q 'SONAME.*libGL\.so\.1'; then
+            echo "FATAL: libGL SONAME is not libGL.so.1 -- the rootfs libGL.so.1 symlink would dangle" >&2
+            exit 1
+          fi
+
+      - name: Gate runtime deps against rootfs inventory and shipped drivers
+        run: |
+          # Every NEEDED library of the new driver must be satisfiable
+          # on-device, otherwise dlopen fails and the driver is recognized
+          # nowhere (blank GPU info) -- the exact symptom this gate exists to
+          # prevent. A dependency passes if EITHER:
+          #   (a) a private copy is bundled inside our own package (/pkg), OR
+          #   (b) a file of that basename exists in the base rootfs.tzst
+          #       (checked out with the repo -- plain 62MB file, no LFS), OR
+          #   (c) it is already NEEDED by one of the shipped, known-working
+          #       driver archives (turnip/vortek/zink/virgl/gladio), which
+          #       proves it loads in this rootfs even if the inventory check
+          #       below missed it (e.g. a lib provided outside usr/lib).
+          # Anything else fails LOUDLY here, naming the exact library, instead
+          # of shipping a dead driver. Compare with the turnip recipe: turnip
+          # is Mesa built with the same x11/XCB/static-LLVM shape, so a
+          # lavapipe dep failing this gate is a real build-config bug (e.g. a
+          # meson flag pulling in a new shared dep), not a device quirk.
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu > /dev/null
+          # Resolve the assets dir: this workflow runs either directly in the
+          # winlator-app repo (assets at app/src/main/assets) or in the
+          # winlator-frost-v3 parent (app/ submodule mount, assets at
+          # app/app/src/main/assets). The CI log tells which: actions/checkout
+          # logs `repository: kaldin54321-boop/winlator-app` for the former.
+          ASSET_BASE=""
+          for cand in "app/src/main/assets" "app/app/src/main/assets"; do
+            if [ -f "$cand/rootfs.tzst" ]; then ASSET_BASE="$cand"; break; fi
+          done
+          if [ -z "$ASSET_BASE" ]; then
+            echo "FATAL: rootfs.tzst found under neither app/src/main/assets nor app/app/src/main/assets -- workspace top level:" >&2
+            ls -la >&2
+            exit 1
+          fi
+          echo "==> Asset base: $ASSET_BASE"
+          echo "==> Inventorying base rootfs libraries"
+          tar --zstd -tf "$ASSET_BASE/rootfs.tzst" | sed 's|.*/||' | sort -u > /tmp/rootfs-files.txt
+          wc -l /tmp/rootfs-files.txt
+          if [ ! -s /tmp/rootfs-files.txt ]; then
+            echo "FATAL: rootfs inventory is empty -- $ASSET_BASE/rootfs.tzst is unreadable" >&2
+            exit 1
+          fi
+          echo "==> Collecting NEEDED sets of shipped working drivers"
+          REFDIR=/tmp/ref-drivers
+          rm -rf "$REFDIR"; mkdir -p "$REFDIR"
+          for a in "$ASSET_BASE"/graphics_driver/turnip-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/vortek-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/zink-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/virgl-*.tzst \
+                   "$ASSET_BASE"/graphics_driver/gladio-*.tzst; do
+            [ -f "$a" ] || continue
+            echo "  reference: $a"
+            tar --zstd -xf "$a" -C "$REFDIR"
+          done
+          aarch64-linux-gnu-readelf -d "$REFDIR"/usr/lib/*.so 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/' | sort -u > /tmp/ref-needed.txt
+          echo "Proven-loadable NEEDED set from shipped drivers:"
+          cat /tmp/ref-needed.txt
+          FAIL=0
+          for f in /tmp/abi-check/usr/lib/libvulkan_lvp.so /tmp/abi-check/usr/lib/libGL.so.1.7.0; do
+            [ -f "$f" ] || continue
+            echo "--- deps of $(basename "$f") ---"
+            for lib in $(aarch64-linux-gnu-readelf -d "$f" | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/'); do
+              if [ -f "/tmp/abi-check/usr/lib/$lib" ]; then
+                echo "  OK (bundled private copy): $lib"
+              elif grep -qx "$lib" /tmp/rootfs-files.txt; then
+                echo "  OK (in base rootfs): $lib"
+              elif grep -qx "$lib" /tmp/ref-needed.txt; then
+                echo "  OK (used by a shipped driver): $lib"
+              else
+                echo "  FATAL: $lib is NEEDED by $(basename "$f") but is NOT bundled, NOT in rootfs.tzst, and used by NO shipped driver -- dlopen will fail on-device" >&2
+                FAIL=1
+              fi
+            done
+          done
+          exit $FAIL
+
+      - name: Upload driver artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvmpipe-${{ env.MESA_VERSION }}-aarch64
+          path: |
+            artifacts/llvmpipe-vulkan-${{ env.MESA_VERSION }}.tzst
+            artifacts/llvmpipe-vulkan-${{ env.MESA_VERSION }}.tzst.sha256
+            artifacts/llvmpipe-opengl-${{ env.MESA_VERSION }}.tzst
+            artifacts/llvmpipe-opengl-${{ env.MESA_VERSION }}.tzst.sha256
+          if-no-files-found: error
+          retention-days: 30

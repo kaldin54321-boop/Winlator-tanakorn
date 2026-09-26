@@ -1,0 +1,920 @@
+package com.winlator.xserver.extensions;
+
+import static com.winlator.xserver.XClientRequestHandler.RESPONSE_CODE_ERROR;
+import static com.winlator.xserver.XClientRequestHandler.RESPONSE_CODE_SUCCESS;
+
+import android.util.Log;
+import android.util.SparseArray;
+import android.util.SparseLongArray;
+
+import androidx.annotation.Keep;
+
+import com.winlator.core.Callback;
+import com.winlator.renderer.Texture;
+import com.winlator.xconnector.XInputStream;
+import com.winlator.xconnector.XOutputStream;
+import com.winlator.xconnector.XStreamLock;
+import com.winlator.xserver.Drawable;
+import com.winlator.xserver.Window;
+import com.winlator.xserver.XClient;
+import com.winlator.xserver.XServer;
+import com.winlator.xserver.errors.BadAlloc;
+import com.winlator.xserver.errors.BadImplementation;
+import com.winlator.xserver.errors.GLXBadContext;
+import com.winlator.xserver.errors.GLXBadFBConfig;
+import com.winlator.xserver.errors.XRequestError;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class GLXExtension extends Extension {
+    public static final byte MAJOR_VERSION = 1;
+    public static final byte MINOR_VERSION = 4;
+    private static final String TAG = "GLXExtension";
+    private static final byte DEFAULT_FBCONFIG_ID = 1;
+    private final SparseArray<SparseLongArray> clientGLXContexts = new SparseArray<>();
+    private final SparseArray<SparseLongArray> clientGLContexts = new SparseArray<>();
+    private final String glxExtensions = "GLX_ARB_create_context GLX_ARB_get_proc_address";
+    private final Callback<XClient> onDestroyClientListener = (client) -> {
+        destroyAllGLContexts(client.fd);
+        destroyAllGLXContexts(client.fd);
+    };
+    // Mesa-driver (llvmpipe/zink/virgl/turnip xlib) protocol state. The Mesa
+    // GLX client library needs a rich FB-config/visual catalog plus a set of
+    // Mesa-dialect requests (MakeCurrent/IsDirect/SwapBuffers/GetString/...)
+    // that the minimal host-GPU (Gladio) dialect below does not provide.
+    private List<int[]> generatedConfigs = null;
+    private final Map<Integer, Integer> fbConfigToVisual = new HashMap<>();
+    private final Map<Integer, Integer> windowToFbConfig = new HashMap<>();
+    // Swap census (see mesaSwapBuffers): throttled per XServer instance.
+    // With direct rendering the GL work happens client-side; SwapBuffers is
+    // the only per-frame GLX traffic, so these lines prove the client is
+    // actually swapping (vs stuck before first swap). swapTotal counts
+    // every swap; each emitted line carries n=... so throttling can never
+    // be mistaken for a client that stopped swapping. Size-aware: a new
+    // window size always logs once, so an early swap on one drawable cannot
+    // hide a later guest window of a different size.
+    private int swapProbeLogs = 0;
+    private long swapTotal = 0;
+    private int lastSwapW = -1;
+    private int lastSwapH = -1;
+    // Heartbeat: same-size swaps re-log at most once per 2s (with the
+    // running total n=...). Distinguishes a live swap loop from a client
+    // stalled before first swap, without per-frame spam.
+    private long lastSwapLogMs = 0;
+
+    static {
+        System.loadLibrary("gladiorenderer");
+    }
+
+    public GLXExtension(XServer xServer, byte majorOpcode) {
+        super(xServer, majorOpcode);
+    }
+
+    private static abstract class ClientOpcodes {
+        private static final byte CREATE_GL_CONTEXT = 1;
+        private static final byte DESTROY_GL_CONTEXT = 2;
+        private static final byte CREATE_CONTEXT = 3;
+        private static final byte DESTROY_CONTEXT = 4;
+        private static final byte MAKE_CURRENT = 5;
+        private static final byte IS_DIRECT = 6;
+        private static final byte QUERY_VERSION = 7;
+        private static final byte SWAP_BUFFERS = 11;
+        private static final byte GET_VISUAL_CONFIGS = 14;
+        private static final byte QUERY_EXTENSIONS_STRING = 18;
+        private static final byte QUERY_SERVER_STRING = 19;
+        private static final byte GET_FB_CONFIGS = 21;
+        private static final byte CREATE_NEW_CONTEXT = 24;
+        private static final byte GET_DRAWABLE_ATTRIBUTES = 29;
+        private static final byte CREATE_WINDOW = 31;
+        private static final byte DESTROY_WINDOW = 32;
+        private static final byte CREATE_CONTEXT_ATTRIBS_ARB = 34;
+        private static final byte SET_CLIENT_INFO_2_ARB = 35;
+        private static final byte GEN_LISTS = 104;
+        private static final int GET_STRING = 129;
+    }
+
+    @Override
+    public String getName() {
+        return "GLX";
+    }
+
+    @Override
+    public byte getErrorCount() {
+        return 3;
+    }
+
+    private void createGLContext(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        int contextId = inputStream.readInt();
+
+        SparseLongArray contexts = clientGLContexts.get(client.fd);
+        if (contexts == null) {
+            clientGLContexts.put(client.fd, contexts = new SparseLongArray());
+            client.addOnDestroyListener(onDestroyClientListener);
+        }
+
+        long context = createGLContext(client.fd);
+        if (context != 0) contexts.put(contextId, context);
+    }
+
+    private void destroyGLContext(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        int contextId = inputStream.readInt();
+
+        SparseLongArray contexts = clientGLContexts.get(client.fd);
+        if (contexts == null) throw new GLXBadContext();
+
+        long context = contexts.get(contextId, 0L);
+        if (context != 0) destroyGLContext(context);
+        contexts.delete(contextId);
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writePad(28);
+        }
+    }
+
+    private void createGLXContextForClient(XClient client, int contextId, int shareContextId) throws IOException, XRequestError {
+        synchronized (clientGLXContexts) {
+            SparseLongArray contexts = clientGLXContexts.get(client.fd);
+            if (contexts == null) {
+                clientGLXContexts.put(client.fd, contexts = new SparseLongArray());
+                client.addOnDestroyListener(onDestroyClientListener);
+            }
+
+            long sharedContextPtr = shareContextId > 0 ? contexts.get(shareContextId) : 0;
+            long context = createGLXContext(contextId, sharedContextPtr);
+            if (context == 0) throw new BadAlloc();
+            contexts.put(contextId, context);
+        }
+    }
+
+    private void createContext(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        int contextId = inputStream.readInt();
+        inputStream.skip(8);
+        int shareList = inputStream.readInt();
+        boolean isDirect = inputStream.readByte() == 1;
+
+        if (contextId == 0) throw new GLXBadContext();
+        createGLXContextForClient(client, contextId, shareList);
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writePad(28);
+        }
+    }
+
+    private void destroyContext(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        int contextId = inputStream.readInt();
+
+        synchronized (clientGLXContexts) {
+            SparseLongArray contexts = clientGLXContexts.get(client.fd);
+            if (contexts == null) throw new GLXBadContext();
+
+            long context = contexts.get(contextId);
+            if (context == 0) throw new GLXBadContext();
+
+            destroyGLXContext(context);
+            contexts.delete(contextId);
+        }
+    }
+
+    private void queryVersion(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        inputStream.skip(8);
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(0);
+            outputStream.writeInt(MAJOR_VERSION);
+            outputStream.writeInt(MINOR_VERSION);
+            outputStream.writePad(16);
+        }
+    }
+
+    private void queryExtensionsString(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        inputStream.skip(4);
+        int length = glxExtensions.length();
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt((length + (-length & 3)) / 4);
+            outputStream.writeInt(0);
+            outputStream.writeInt(length);
+            outputStream.writePad(16);
+            outputStream.writeString8(glxExtensions);
+        }
+    }
+
+    private void queryServerString(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        inputStream.skip(4);
+        int name = inputStream.readInt();
+
+        String string = "";
+
+        switch (name) {
+            case GLXEnums.GLX_VENDOR:
+                string = "Winlator";
+                break;
+            case GLXEnums.GLX_VERSION:
+                string = MAJOR_VERSION+"."+MINOR_VERSION;
+                break;
+            case GLXEnums.GLX_EXTENSIONS:
+                string = glxExtensions;
+                break;
+        }
+        int length = string.length();
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt((length + (-length & 3)) / 4);
+            outputStream.writeInt(0);
+            outputStream.writeInt(length);
+            outputStream.writePad(16);
+            outputStream.writeString8(string);
+        }
+    }
+
+    private void getFBConfigs(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        inputStream.skip(4);
+
+        final int numFBConfigs = 1;
+        final int numProperties = 11;
+        final int[] properties = new int[]{
+            GLXEnums.GLX_FBCONFIG_ID, DEFAULT_FBCONFIG_ID,
+            GLXEnums.GLX_RED_SIZE, 8,
+            GLXEnums.GLX_GREEN_SIZE, 8,
+            GLXEnums.GLX_BLUE_SIZE, 8,
+            GLXEnums.GLX_ALPHA_SIZE, 8,
+            GLXEnums.GLX_DEPTH_SIZE, 24,
+            GLXEnums.GLX_STENCIL_SIZE, 8,
+            GLXEnums.GLX_BUFFER_SIZE, 32,
+            GLXEnums.GLX_DOUBLEBUFFER, 1,
+            GLXEnums.GLX_DRAWABLE_TYPE, GLXEnums.GLX_WINDOW_BIT,
+            GLXEnums.GLX_RENDER_TYPE, GLXEnums.GLX_RGBA_BIT
+        };
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(2 * numFBConfigs * numProperties);
+            outputStream.writeInt(numFBConfigs);
+            outputStream.writeInt(numProperties);
+            outputStream.writePad(16);
+
+            for (int i = 0, j, k = 0; i < numFBConfigs; i++) {
+                for (j = 0; j < numProperties; j++, k++) {
+                    outputStream.writeInt(properties[k*2+0]);
+                    outputStream.writeInt(properties[k*2+1]);
+                }
+            }
+        }
+    }
+
+    private void createContextAttribsARB(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        int contextId = inputStream.readInt();
+        int fbConfigId = inputStream.readInt();
+        inputStream.skip(4);
+        int shareContext = inputStream.readInt();
+        inputStream.skip(4);
+        int numAttribs = inputStream.readInt();
+
+        if (contextId == 0) throw new GLXBadContext();
+        if (fbConfigId != DEFAULT_FBCONFIG_ID) throw new GLXBadFBConfig();
+
+        int glMajorVersion = 3;
+        int glMinorVersion = 3;
+        for (int i = 0; i < numAttribs; i++) {
+            int name = inputStream.readInt();
+            int value = inputStream.readInt();
+
+            if (name == GLXEnums.GLX_CONTEXT_MAJOR_VERSION_ARB) glMajorVersion = value;
+            else if (name == GLXEnums.GLX_CONTEXT_MINOR_VERSION_ARB) glMinorVersion = value;
+        }
+
+        // Host-GPU (Gladio) personality only: the native GLES renderer behind
+        // createGLXContext is 3.x class, hence the <= 3.3 gate. Mesa-driver
+        // clients never reach this method (mesaCreateContextAttribsARB below
+        // accepts any version -- direct rendering happens client-side).
+        boolean success = glMajorVersion <= 3 && glMinorVersion <= 3;
+        if (success) createGLXContextForClient(client, contextId, shareContext);
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(success ? RESPONSE_CODE_SUCCESS : RESPONSE_CODE_ERROR);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writePad(28);
+        }
+    }
+
+    // Full Mesa-dialect GLX handlers. Used when
+    // xServer.screenInfo.getMesaDriverMode() is true (default; every slot
+    // except Gladio). Mesa's xlib libGL performs direct client-side rendering
+    // and only needs the server to answer protocol queries plausibly: a rich
+    // FB-config catalog, version-agnostic context creation (no host GL
+    // context is allocated -- rendering never touches the host GPU), direct-
+    // rendering affirmation and swap presentation via forceUpdate.
+
+    private synchronized List<int[]> getFBConfigsList() {
+        if (generatedConfigs != null) return generatedConfigs;
+
+        List<int[]> configs = new ArrayList<>();
+        fbConfigToVisual.clear();
+
+        int[] visualIds = {xServer.pixmapManager.glxVisual.id, xServer.pixmapManager.visual.id};
+        int[] colorSizes = {24, 32};
+        boolean[] doubleBufferOptions = {false, true};
+        int[] depthOptions = {0, 24};
+        int[] stencilOptions = {0, 8};
+        int[] accumOptions = {0, 64};
+        int[] drawableTypeOptions = {
+                GLXEnums.GLX_WINDOW_BIT,
+                GLXEnums.GLX_PBUFFER_BIT | GLXEnums.GLX_PIXMAP_BIT,
+                GLXEnums.GLX_WINDOW_BIT | GLXEnums.GLX_PBUFFER_BIT | GLXEnums.GLX_PIXMAP_BIT
+        };
+
+        int fbconfigId = 1;
+        for (int i = 0; i < visualIds.length; i++) {
+            int visualId = visualIds[i];
+            int colorBits = colorSizes[i];
+            int red = 8, green = 8, blue = 8, alpha = (colorBits == 32) ? 8 : 0;
+            for (boolean doubleBuffer : doubleBufferOptions) {
+                for (int depth : depthOptions) {
+                    for (int stencil : stencilOptions) {
+                        for (int accum : accumOptions) {
+                            for (int drawableType : drawableTypeOptions) {
+                                boolean isWindow = (drawableType & GLXEnums.GLX_WINDOW_BIT) != 0;
+                                List<Integer> attrs = new ArrayList<>();
+                                attrs.add(GLXEnums.GLX_FBCONFIG_ID); attrs.add(fbconfigId);
+                                attrs.add((int) GLXEnums.GLX_BUFFER_SIZE); attrs.add(colorBits);
+                                attrs.add((int) GLXEnums.GLX_LEVEL); attrs.add(0);
+                                attrs.add((int) GLXEnums.GLX_DOUBLEBUFFER); attrs.add(doubleBuffer ? 1 : 0);
+                                attrs.add((int) GLXEnums.GLX_STEREO); attrs.add(0);
+                                attrs.add((int) GLXEnums.GLX_AUX_BUFFERS); attrs.add(0);
+                                attrs.add((int) GLXEnums.GLX_RED_SIZE); attrs.add(red);
+                                attrs.add((int) GLXEnums.GLX_GREEN_SIZE); attrs.add(green);
+                                attrs.add((int) GLXEnums.GLX_BLUE_SIZE); attrs.add(blue);
+                                attrs.add((int) GLXEnums.GLX_ALPHA_SIZE); attrs.add(alpha);
+                                attrs.add((int) GLXEnums.GLX_DEPTH_SIZE); attrs.add(depth);
+                                attrs.add((int) GLXEnums.GLX_STENCIL_SIZE); attrs.add(stencil);
+                                attrs.add((int) GLXEnums.GLX_ACCUM_RED_SIZE); attrs.add(accum);
+                                attrs.add((int) GLXEnums.GLX_ACCUM_GREEN_SIZE); attrs.add(accum);
+                                attrs.add((int) GLXEnums.GLX_ACCUM_BLUE_SIZE); attrs.add(accum);
+                                attrs.add((int) GLXEnums.GLX_ACCUM_ALPHA_SIZE); attrs.add(accum);
+                                attrs.add((int) GLXEnums.GLX_RENDER_TYPE); attrs.add((int) GLXEnums.GLX_RGBA_BIT);
+                                attrs.add((int) GLXEnums.GLX_DRAWABLE_TYPE); attrs.add(drawableType);
+                                attrs.add((int) GLXEnums.GLX_X_RENDERABLE); attrs.add(isWindow ? 1 : 0);
+                                attrs.add((int) GLXEnums.GLX_X_VISUAL_TYPE); attrs.add(isWindow ? 0x8002 : 0);
+                                attrs.add((int) GLXEnums.GLX_CONFIG_CAVEAT); attrs.add(0x8000);
+                                attrs.add((int) GLXEnums.GLX_TRANSPARENT_TYPE); attrs.add(0x8000);
+                                attrs.add((int) GLXEnums.GLX_TRANSPARENT_RED_VALUE); attrs.add(0);
+                                attrs.add((int) GLXEnums.GLX_TRANSPARENT_GREEN_VALUE); attrs.add(0);
+                                attrs.add((int) GLXEnums.GLX_TRANSPARENT_BLUE_VALUE); attrs.add(0);
+                                attrs.add((int) GLXEnums.GLX_TRANSPARENT_ALPHA_VALUE); attrs.add(0);
+                                attrs.add((int) GLXEnums.GLX_TRANSPARENT_INDEX_VALUE); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_VISUAL_ID); attrs.add(isWindow ? visualId : 0);
+                                attrs.add(GLXEnums.GLX_SAMPLE_BUFFERS); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_SAMPLES); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_MAX_PBUFFER_WIDTH); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_MAX_PBUFFER_HEIGHT); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_MAX_PBUFFER_PIXELS); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_OPTIMAL_PBUFFER_WIDTH_SGIX); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_OPTIMAL_PBUFFER_HEIGHT_SGIX); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_VISUAL_SELECT_GROUP_SGIX); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_SWAP_METHOD_OML); attrs.add(0x8063);
+                                attrs.add(GLXEnums.GLX_BIND_TO_TEXTURE_RGB_EXT); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_BIND_TO_TEXTURE_RGBA_EXT); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_BIND_TO_MIPMAP_TEXTURE_EXT); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_BIND_TO_TEXTURE_TARGETS_EXT); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_Y_INVERTED_EXT); attrs.add(0);
+                                attrs.add(GLXEnums.GLX_FRAMEBUFFER_SRGB_CAPABLE_EXT); attrs.add(0);
+
+                                configs.add(attrs.stream().mapToInt(Integer::intValue).toArray());
+                                fbConfigToVisual.put(fbconfigId, isWindow ? visualId : 0);
+                                fbconfigId++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        generatedConfigs = configs;
+        return configs;
+    }
+
+    private void mesaQueryVersion(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextTag = inputStream.readInt();
+        int name = inputStream.readInt();
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(0);
+            outputStream.writeInt(MAJOR_VERSION);
+            outputStream.writeInt(MINOR_VERSION);
+            outputStream.writePad(16);
+        }
+    }
+
+    private void mesaQueryServerString(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextTag = inputStream.readInt();
+        int name = inputStream.readInt();
+
+        String str;
+        if (name == GLXEnums.GLX_VENDOR) {
+            str = "Winlator ";
+        }
+        else if (name == GLXEnums.GLX_VERSION) {
+            str = "1.4 ";
+        }
+        else if (name == GLXEnums.GLX_EXTENSIONS) {
+            str = "GLX_ARB_create_context GLX_ARB_create_context_no_error GLX_ARB_create_context_profile " +
+                    "GLX_ARB_fbconfig_float GLX_ARB_framebuffer_sRGB GLX_ARB_multisample GLX_EXT_create_context_es_profile " +
+                    "GLX_EXT_create_context_es2_profile GLX_EXT_fbconfig_packed_float GLX_EXT_framebuffer_sRGB " +
+                    "GLX_EXT_get_drawable_type GLX_EXT_libglvnd GLX_EXT_no_config_context GLX_EXT_texture_from_pixmap " +
+                    "GLX_EXT_visual_info GLX_EXT_visual_rating GLX_MESA_copy_sub_buffer GLX_OML_swap_method " +
+                    "GLX_SGI_make_current_read GLX_SGIS_multisample GLX_SGIX_fbconfig GLX_SGIX_pbuffer GLX_SGIX_visual_select_group " +
+                    "GLX_MESA_pixmap_colormap GLX_MESA_release_buffers GLX_ARB_get_proc_address " +
+                    "GLX_ARB_create_context_robustness GLX_EXT_import_context GLX_INTEL_swap_event ";
+        } else {
+            str = "mesa ";
+        }
+
+        byte[] bytes = str.getBytes(StandardCharsets.US_ASCII);
+        int len = bytes.length;
+        int pad = (4 - (len % 4)) % 4;
+        int dataWords = (len + pad) / 4;
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(dataWords);
+            outputStream.writePad(4);
+            outputStream.writeInt(len);
+            outputStream.writePad(16);
+
+            outputStream.write(bytes);
+            outputStream.writePad(pad);
+        }
+    }
+
+    private void mesaGetVisualConfigs(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int screen = inputStream.readInt();
+
+        int[] attrs1 = {xServer.pixmapManager.glxVisual.id, 4, 1, 8, 8, 8, 0, 0, 0, 0, 0, 1, 0, 24, 24, 0, 0, 0,
+                0x00000020, 0x00008000,
+                0x00000023, 0x00008000,
+                0x00000025, 0xffffffff,
+                0x00000026, 0xffffffff,
+                0x00000027, 0xffffffff,
+                0x00000028, 0xffffffff,
+                0x00000024, 0x00000000,
+                0x000186a1, 0x00000000,
+                0x000186a0, 0x00000000,
+                0x00008028, 0x00000000,
+                0x00000000, 0x00000000
+        };
+
+        int[] attrs2 = {xServer.pixmapManager.visual.id, 4, 1, 8, 8, 8, 0, 0, 0, 0, 0, 1, 0, 24, 24, 0, 0, 0,
+                0x00000020, 0x00008000,
+                0x00000023, 0x00008000,
+                0x00000025, 0xffffffff,
+                0x00000026, 0xffffffff,
+                0x00000027, 0xffffffff,
+                0x00000028, 0xffffffff,
+                0x00000024, 0x00000000,
+                0x000186a1, 0x00000000,
+                0x000186a0, 0x00000000,
+                0x00008028, 0x00000000,
+                0x00000000, 0x00000000
+        };
+
+        int numVisuals = 2;
+        int length = attrs1.length;
+        int dataWords = length * numVisuals;
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(dataWords);
+            outputStream.writeInt(numVisuals);
+            outputStream.writeInt(length);
+            outputStream.writePad(16);
+            for (int v : attrs1) outputStream.writeInt(v);
+            for (int v : attrs2) outputStream.writeInt(v);
+        }
+    }
+
+    private void mesaGetFBConfigs(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int screen = inputStream.readInt();
+
+        List<int[]> allConfigs = getFBConfigsList();
+        int numConfigs = allConfigs.size();
+        int numProperties = allConfigs.get(0).length / 2;
+        int dataWords = 2 * numConfigs * numProperties;
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(dataWords);
+            outputStream.writeInt(numConfigs);
+            outputStream.writeInt(numProperties);
+            outputStream.writePad(16);
+            for (int[] cfg : allConfigs) {
+                for (int value : cfg) {
+                    outputStream.writeInt(value);
+                }
+            }
+        }
+    }
+
+    private void mesaCreateContext(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextId = inputStream.readInt();
+        int visualId = inputStream.readInt();
+        int screen = inputStream.readInt();
+        int shareList = inputStream.readInt();
+        boolean isDirect = inputStream.readInt() != 0;
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writePad(24);
+            outputStream.writePad(4);
+        }
+    }
+
+    private void mesaIsDirect(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextId = inputStream.readInt();
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(1);
+            outputStream.writeByte((byte)1);
+            outputStream.writePad(23);
+            outputStream.writePad(4);
+        }
+    }
+
+    private void mesaMakeCurrent(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        int drawable = inputStream.readInt();
+        int readDrawable = inputStream.readInt();
+        int contextId = inputStream.readInt();
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(1);
+            outputStream.writeInt(0);
+            outputStream.writePad(20);
+        }
+    }
+
+    private void mesaGetString(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextTag = inputStream.readInt();
+        int name = inputStream.readInt();
+
+        String str;
+        switch (name) {
+            case 0x1F00: str = "Mesa Project"; break;
+            case 0x1F01: str = "Software Rasterizer"; break;
+            case 0x1F02: str = "1.4"; break;
+            case 0x1F03: str = "GL_ARB_multitexture GL_EXT_texture_env_add"; break;
+            default: str = "";
+        }
+
+        byte[] bytes = str.getBytes(StandardCharsets.US_ASCII);
+        int len = bytes.length;
+        int pad = (4 - (len % 4)) % 4;
+        int dataWords = (len + pad) / 4;
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(dataWords);
+            outputStream.writePad(4);
+            outputStream.writeInt(len);
+            outputStream.writePad(16);
+            outputStream.write(bytes);
+            outputStream.writePad(pad);
+        }
+    }
+
+    private void mesaSwapBuffers(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int drawable = inputStream.readInt();
+        Window window = xServer.windowManager.getWindow(drawable);
+        swapTotal++;
+        int w = window != null ? window.getWidth() : -1;
+        int h = window != null ? window.getHeight() : -1;
+        long nowMs = android.os.SystemClock.uptimeMillis();
+        if (swapProbeLogs < 3 || w != lastSwapW || h != lastSwapH || nowMs - lastSwapLogMs >= 2000) {
+            swapProbeLogs++;
+            lastSwapW = w;
+            lastSwapH = h;
+            lastSwapLogMs = nowMs;
+            Log.e("GraphicsDriver", "GLXSwap: drawable=" + drawable
+                + (window != null
+                    ? " window=" + window.id + " " + w + "x" + h
+                    : " NO-WINDOW (swap dropped)")
+                + " n=" + swapTotal);
+        }
+        if (window != null) {
+            window.getContent().forceUpdate();
+        }
+    }
+
+    private void mesaGenLists(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextTag = inputStream.readInt();
+        int range = inputStream.readInt();
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(1);
+            outputStream.writeInt(1);
+            outputStream.writePad(20);
+        }
+    }
+
+    private void mesaCreateNewContext(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextId = inputStream.readInt();
+        int fbConfig = inputStream.readInt();
+        int screen = inputStream.readInt();
+        int renderType = inputStream.readInt();
+        int shareList = inputStream.readInt();
+        int isDirect = inputStream.readInt();
+
+        // Byte parity with the proven alexvorxx/winlator server (and with
+        // every other context-creation reply in this file: mesaCreateContext
+        // and mesaGetDrawableAttributes both carry the same trailing
+        // "Additional" pad). A shorter reply was tried and reverted: with a
+        // mismatched reply size the client's reply stream desynchronises and
+        // all later GLX traffic parses against wrong offsets (wrong
+        // drawables/sizes for subsequent requests) -- grey TestD3D with a
+        // healthy-looking handshake.
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(0);
+            outputStream.writeInt(contextId);
+            outputStream.writePad(24);
+        }
+    }
+
+    private void mesaCreateContextAttribsARB(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextId = inputStream.readInt();
+        int fbConfigId = inputStream.readInt();
+        inputStream.skip(4);
+        int shareContext = inputStream.readInt();
+        inputStream.skip(4);
+        int numAttribs = inputStream.readInt();
+
+        for (int i = 0; i < numAttribs; i++) {
+            int name = inputStream.readInt();
+            int value = inputStream.readInt();
+        }
+        // Deliberately no version gate and no host GL context: Mesa clients
+        // render direct (client-side) at whatever version they request
+        // (llvmpipe defaults to 4.5 core). Gating here is what used to blank
+        // every Mesa GL client; the host-GPU (Gladio) gate lives in
+        // createContextAttribsARB, used only when mesaDriverMode is false.
+    }
+
+    private void mesaGetDrawableAttributes(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int drawable = inputStream.readInt();
+
+        int remaining = client.getRequestLength() - 4;
+        if (remaining > 0) inputStream.skip(remaining);
+
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte((byte) RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(1);
+            outputStream.writeInt(0);
+            outputStream.writePad(20);
+            outputStream.writePad(4);
+        }
+    }
+
+    private void mesaDestroyContext(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int contextId = inputStream.readInt();
+    }
+
+    private void mesaCreateWindow(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int screen = inputStream.readInt();
+        int fbconfig = inputStream.readInt();
+        int window = inputStream.readInt();
+        int glxWindow = inputStream.readInt();
+        int numAttribs = inputStream.readInt();
+
+        for (int i = 0; i < numAttribs * 2; i++) {
+            inputStream.readInt();
+        }
+
+        windowToFbConfig.put(glxWindow, fbconfig);
+    }
+
+    private void mesaDestroyWindow(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        int glxWindow = inputStream.readInt();
+        windowToFbConfig.remove(glxWindow);
+    }
+
+    @Override
+    public void handleRequest(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        try {
+            int glxCode = client.getRequestData() & 0xFF;
+            // Mesa-driver personality (default; every slot except Gladio) vs
+            // host-GPU (Gladio) personality. Mesa's xlib libGL requires the
+            // Mesa dialect below; the old single-personality server answered
+            // Mesa clients with "unknown request" errors and a <= 3.3 version
+            // gate, which is exactly how llvmpipe OpenGL ended up blank while
+            // Gladio-family drivers kept working.
+            boolean mesaDriverMode = xServer.screenInfo.getMesaDriverMode();
+            switch (glxCode) {
+                case ClientOpcodes.QUERY_VERSION:
+                    if (mesaDriverMode)
+                        mesaQueryVersion(client, inputStream, outputStream);
+                    else
+                        queryVersion(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.QUERY_EXTENSIONS_STRING:
+                    queryExtensionsString(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.QUERY_SERVER_STRING:
+                    if (mesaDriverMode)
+                        mesaQueryServerString(client, inputStream, outputStream);
+                    else
+                        queryServerString(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.GET_VISUAL_CONFIGS:
+                    mesaGetVisualConfigs(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.GET_FB_CONFIGS:
+                    if (mesaDriverMode)
+                        mesaGetFBConfigs(client, inputStream, outputStream);
+                    else
+                        getFBConfigs(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.CREATE_CONTEXT:
+                    if (mesaDriverMode)
+                        mesaCreateContext(client, inputStream, outputStream);
+                    else
+                        createContext(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.DESTROY_CONTEXT:
+                    if (mesaDriverMode)
+                        mesaDestroyContext(client, inputStream, outputStream);
+                    else
+                        destroyContext(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.IS_DIRECT:
+                    mesaIsDirect(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.MAKE_CURRENT:
+                    mesaMakeCurrent(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.GET_STRING:
+                    mesaGetString(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.CREATE_GL_CONTEXT:
+                    if (mesaDriverMode)
+                        inputStream.skip(client.getRemainingRequestLength());
+                    else
+                        createGLContext(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.DESTROY_GL_CONTEXT:
+                    destroyGLContext(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.SWAP_BUFFERS:
+                    mesaSwapBuffers(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.GEN_LISTS:
+                    mesaGenLists(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.CREATE_CONTEXT_ATTRIBS_ARB:
+                    if (mesaDriverMode)
+                        mesaCreateContextAttribsARB(client, inputStream, outputStream);
+                    else
+                        createContextAttribsARB(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.CREATE_NEW_CONTEXT:
+                    mesaCreateNewContext(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.SET_CLIENT_INFO_2_ARB:
+                    inputStream.skip(client.getRemainingRequestLength());
+                    break;
+                case ClientOpcodes.GET_DRAWABLE_ATTRIBUTES:
+                    mesaGetDrawableAttributes(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.CREATE_WINDOW:
+                    mesaCreateWindow(client, inputStream, outputStream);
+                    break;
+                case ClientOpcodes.DESTROY_WINDOW:
+                    mesaDestroyWindow(client, inputStream, outputStream);
+                    break;
+                default:
+                    Log.w(TAG, "Unknown glxCode: " + glxCode);
+                    throw new BadImplementation();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error handling GLX request", e);
+            throw e;
+        }
+    }
+
+    @Keep
+    private short[] getWindowSize(int windowId) {
+        Window window = xServer.windowManager.getWindow(windowId);
+        return window != null ? new short[]{window.getWidth(), window.getHeight()} : new short[]{0, 0};
+    }
+
+    @Keep
+    private void clearWindowContent(int windowId) {
+        Window window = xServer.windowManager.getWindow(windowId);
+        if (window != null) {
+            Drawable drawable = window.getContent();
+            if (drawable.getData() != null) {
+                drawable.setData(null);
+                drawable.getTexture().destroy();
+            }
+        }
+    }
+
+    @Keep
+    private boolean updateWindowContent(int drawableId, short width, short height, boolean flipY) {
+        Drawable drawable = xServer.drawableManager.getDrawable(drawableId);
+        if (drawable == null) return true;
+
+        synchronized (drawable.renderLock) {
+            if (drawable.width != width || drawable.height != height) return false;
+
+            drawable.setData(null);
+            Texture texture = drawable.getTexture();
+            texture.setFlipY(flipY);
+            texture.copyFromReadBuffer(width, height);
+            Runnable onDrawListener = drawable.getOnDrawListener();
+            if (onDrawListener != null) onDrawListener.run();
+        }
+        return true;
+    }
+
+    @Keep
+    private long getGLXContextPtr(int clientFd, int id) {
+        synchronized (clientGLXContexts) {
+            SparseLongArray contexts = clientGLXContexts.get(clientFd);
+            return contexts != null ? contexts.get(id) : 0;
+        }
+    }
+
+    private void destroyAllGLContexts(int clientFd) {
+        synchronized (clientGLContexts) {
+            SparseLongArray contexts = clientGLContexts.get(clientFd);
+            if (contexts != null) {
+                for (int i = 0; i < contexts.size(); i++) destroyGLContext(contexts.valueAt(i));
+                contexts.clear();
+            }
+            clientGLContexts.remove(clientFd);
+        }
+    }
+
+    private void destroyAllGLXContexts(int clientFd) {
+        synchronized (clientGLXContexts) {
+            SparseLongArray contexts = clientGLXContexts.get(clientFd);
+            if (contexts != null) {
+                for (int i = 0; i < contexts.size(); i++) destroyGLXContext(contexts.valueAt(i));
+                contexts.clear();
+            }
+            clientGLXContexts.remove(clientFd);
+        }
+    }
+
+    private native long createGLContext(int clientFd);
+
+    private native void destroyGLContext(long contextPtr);
+
+    private native long createGLXContext(int contextId, long sharedContextPtr);
+
+    private native void destroyGLXContext(long contextPtr);
+}

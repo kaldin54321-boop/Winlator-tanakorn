@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- White desktop/window outline used by the GameHub-style container launching overlay. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="72dp"
+    android:height="72dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M4,6 L4,5 C4,4.4 4.4,4 5,4 L19,4 C19.6,4 20,4.4 20,5 L20,17 C20,17.6 19.6,18 19,18 L5,18 C4.4,18 4,17.6 4,17 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M7,7.5 h2.2 v2.2 H7 Z M9.8,7.5 h2.2 v2.2 H9.8 Z M7,10.3 h2.2 v2.2 H7 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M14.5,15.2 h3" />
+</vector>

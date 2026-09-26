@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="screen_size_entries">
+        <item>@string/custom</item>
+        <item>640x360 (16:9)</item>
+        <item>640x480 (4:3)</item>
+        <item>800x600 (4:3)</item>
+        <item>854x480 (16:9)</item>
+        <item>960x544 (16:9)</item>
+        <item>1024x768 (4:3)</item>
+        <item>1280x720 (16:9)</item>
+        <item>1280x800 (16:10)</item>
+        <item>1280x1024 (5:4)</item>
+        <item>1366x768 (16:9)</item>
+        <item>1440x900 (16:10)</item>
+        <item>1600x900 (16:9)</item>
+        <item>1920x1080 (16:9)</item>
+    </string-array>
+    <string-array name="audio_driver_entries">
+        <item>ALSA</item>
+        <item>PulseAudio</item>
+    </string-array>
+    <string-array name="binding_type_entries">
+        <item>Keyboard</item>
+        <item>Mouse</item>
+        <item>Gamepad</item>
+    </string-array>
+    <string-array name="max_device_memory_entries">
+        <item>@string/zero_no_limit</item>
+        <item>512 MB</item>
+        <item>1 GB</item>
+        <item>2 GB</item>
+        <item>4 GB</item>
+        <item>6 GB</item>
+        <item>8 GB</item>
+        <item>12 GB</item>
+    </string-array>
+    <string-array name="video_memory_size_entries">
+        <item>32 MB</item>
+        <item>64 MB</item>
+        <item>128 MB</item>
+        <item>256 MB</item>
+        <item>512 MB</item>
+        <item>1 GB</item>
+        <item>2 GB</item>
+        <item>4 GB</item>
+        <item>6 GB</item>
+        <item>8 GB</item>
+        <item>12 GB</item>
+    </string-array>
+    <string-array name="image_cache_size_entries">
+        <item>64 MB</item>
+        <item>128 MB</item>
+        <item>256 MB</item>
+        <item>512 MB</item>
+        <item>1024 MB</item>
+    </string-array>
+    <string-array name="dxvk_framerate_entries">
+        <item>@string/zero_no_limit</item>
+        <item>30</item>
+        <item>60</item>
+        <item>120</item>
+    </string-array>
+    <string-array name="vegas_config_file_entries">
+        <item>/storage/emulated/0/dxvk.conf</item>
+        <item>/storage/emulated/0/starengine.ini</item>
+        <item>/storage/emulated/0/Download/dxvk.conf</item>
+        <item>/storage/emulated/0/Winlator/dxvk.conf</item>
+    </string-array>
+    <string-array name="ddraw_wrapper_entries">
+        <item>WineD3D</item>
+        <item>CNC DDraw</item>
+        <item>D7VK</item>
+        <item>dgVoodoo</item>
+    </string-array>
+    <string-array name="wined3d_renderer_entries">
+        <item>GDI</item>
+        <item>GL</item>
+        <item>Vulkan</item>
+    </string-array>
+    <string-array name="wincomponent_entries">
+        <item>@string/builtin_wine</item>
+        <item>@string/native_windows</item>
+    </string-array>
+    <string-array name="dinput_mapper_type_entries">
+        <item>Standard</item>
+        <item>XInput</item>
+    </string-array>
+    <string-array name="desktop_background_type_entries">
+        <item>@string/image</item>
+        <item>@string/solid_color</item>
+    </string-array>
+    <string-array name="hud_mode_entries">
+        <item>@string/disabled</item>
+        <item>@string/simple_fps</item>
+        <item>@string/full</item>
+    </string-array>
+    <string-array name="startup_selection_entries">
+        <item>@string/startup_selection_normal</item>
+        <item>@string/startup_selection_essential</item>
+        <item>@string/startup_selection_aggressive</item>
+    </string-array>
+    <string-array name="audio_performance_mode_entries">
+        <item>@string/none</item>
+        <item>@string/low_latency</item>
+        <item>@string/power_saving</item>
+    </string-array>
+    <string-array name="opengl_version_entries">
+        <item>2.0</item>
+        <item>2.1</item>
+        <item>3.0</item>
+        <item>3.1</item>
+        <item>3.2</item>
+        <item>3.3</item>
+        <item>4.0</item>
+    </string-array>
+    <string-array name="d3d_feature_level_entries">
+        <item>11.0</item>
+        <item>11.1</item>
+        <item>12.0</item>
+        <item>12.1</item>
+        <item>12.2</item>
+    </string-array>
+    <string-array name="system_font_entries">
+        <item>Arial</item>
+        <item>Andale Mono</item>
+        <item>Comic Sans MS</item>
+        <item>Courier New</item>
+        <item>Georgia</item>
+        <item>Impact</item>
+        <item>Tahoma</item>
+        <item>Times New Roman</item>
+        <item>Trebuchet MS</item>
+        <item>Verdana</item>
+    </string-array>
+    <string-array name="box64_logs">
+        <item>@string/disable</item>
+        <item>@string/minimal</item>
+        <item>@string/trace</item>
+    </string-array>
+    <string-array name="vk_version_entries">
+        <item>1.0</item>
+        <item>1.1</item>
+        <item>1.2</item>
+        <item>1.3</item>
+    </string-array>
+    <string-array name="midi_channel_entries">
+        <item>Ch1</item>
+        <item>Drum (Ch10)</item>
+    </string-array>
+    <string-array name="language_entries">
+        <item>English</item>
+        <item>Português</item>
+        <item>Русский</item>
+        <item>Deutsch</item>
+        <item>Français</item>
+        <item>Español</item>
+        <item>Italiano</item>
+        <item>日本語</item>
+        <item>한국어</item>
+        <item>Türkçe</item>
+        <item>العربية</item>
+        <item>Tiếng Việt</item>
+        <item>ไทย</item>
+        <item>Bahasa Indonesia</item>
+        <item>中文</item>
+    </string-array>
+    <string-array name="resource_memory_type_entries">
+        <item>@string/auto</item>
+        <item>Opaque FD</item>
+        <item>DMA Buffer</item>
+        <item>Native Hardware Buffer</item>
+    </string-array>
+    <string-array name="component_source_entries">
+        <item>Bruno (Default)</item>
+        <item>Afei</item>
+    </string-array>
+    <string-array name="lc_all_entries">
+        <item>C</item>
+        <item>C.UTF-8</item>
+        <item>en_US.UTF-8</item>
+        <item>en_GB.UTF-8</item>
+        <item>ar_EG.UTF-8</item>
+        <item>ar_SA.UTF-8</item>
+        <item>bg_BG.UTF-8</item>
+        <item>ca_ES.UTF-8</item>
+        <item>cs_CZ.UTF-8</item>
+        <item>da_DK.UTF-8</item>
+        <item>de_DE.UTF-8</item>
+        <item>el_GR.UTF-8</item>
+        <item>es_ES.UTF-8</item>
+        <item>fi_FI.UTF-8</item>
+        <item>fr_FR.UTF-8</item>
+        <item>he_IL.UTF-8</item>
+        <item>hi_IN.UTF-8</item>
+        <item>hr_HR.UTF-8</item>
+        <item>hu_HU.UTF-8</item>
+        <item>id_ID.UTF-8</item>
+        <item>it_IT.UTF-8</item>
+        <item>ja_JP.UTF-8</item>
+        <item>ko_KR.UTF-8</item>
+        <item>ms_MY.UTF-8</item>
+        <item>nb_NO.UTF-8</item>
+        <item>nl_NL.UTF-8</item>
+        <item>pl_PL.UTF-8</item>
+        <item>pt_PT.UTF-8</item>
+        <item>pt_BR.UTF-8</item>
+        <item>ro_RO.UTF-8</item>
+        <item>ru_RU.UTF-8</item>
+        <item>sk_SK.UTF-8</item>
+        <item>sv_SE.UTF-8</item>
+        <item>th_TH.UTF-8</item>
+        <item>tr_TR.UTF-8</item>
+        <item>uk_UA.UTF-8</item>
+        <item>vi_VN.UTF-8</item>
+        <item>zh_CN.UTF-8</item>
+        <item>zh_TW.UTF-8</item>
+    </string-array>
+    <string-array name="timezone_entries">
+        <item>UTC</item>
+        <item>America/New_York</item>
+        <item>America/Chicago</item>
+        <item>America/Denver</item>
+        <item>America/Los_Angeles</item>
+        <item>America/Anchorage</item>
+        <item>Pacific/Honolulu</item>
+        <item>America/Toronto</item>
+        <item>America/Mexico_City</item>
+        <item>America/Bogota</item>
+        <item>America/Sao_Paulo</item>
+        <item>Europe/London</item>
+        <item>Europe/Paris</item>
+        <item>Europe/Berlin</item>
+        <item>Europe/Moscow</item>
+        <item>Africa/Cairo</item>
+        <item>Asia/Dubai</item>
+        <item>Asia/Karachi</item>
+        <item>Asia/Kolkata</item>
+        <item>Asia/Bangkok</item>
+        <item>Asia/Singapore</item>
+        <item>Asia/Kuala_Lumpur</item>
+        <item>Asia/Shanghai</item>
+        <item>Asia/Taipei</item>
+        <item>Asia/Tokyo</item>
+        <item>Asia/Seoul</item>
+        <item>Australia/Sydney</item>
+        <item>Pacific/Auckland</item>
+    </string-array>
+    <string-array name="present_mode_entries">
+        <item>immediate</item>
+        <item>mailbox</item>
+        <item>fifo</item>
+        <item>fifo_relaxed</item>
+    </string-array>
+</resources>

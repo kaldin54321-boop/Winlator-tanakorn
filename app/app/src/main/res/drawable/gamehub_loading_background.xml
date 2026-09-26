@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- GameHub-style launching overlay background: dark navy gradient. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="135"
+        android:startColor="#1c2942"
+        android:centerColor="#121a2d"
+        android:endColor="#070b16"
+        android:type="linear" />
+</shape>

@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:scrollbars="none">
+
+    <LinearLayout
+        android:layout_width="300dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Top Header Section -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center_horizontal"
+            android:layout_marginBottom="16dp">
+
+            <ImageView
+                android:layout_width="100dp"
+                android:layout_height="100dp"
+                android:src="@mipmap/ic_launcher"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginBottom="12dp" />
+
+            <TextView
+                android:id="@+id/TVAppName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="24sp"
+                android:textStyle="bold"
+                android:textColor="#5c7c99"
+                android:text="@string/app_name"
+                android:gravity="center" />
+
+            <TextView
+                android:id="@+id/TVAppVersion"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="14sp"
+                android:textColor="?attr/colorSecondaryText"
+                android:layout_marginTop="2dp"
+                android:gravity="center" />
+
+            <TextView
+                android:id="@+id/TVWebpage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="14sp"
+                android:textColor="#38b6ff"
+                android:textColorLink="#38b6ff"
+                android:layout_marginTop="4dp"
+                android:gravity="center" />
+        </LinearLayout>
+
+        <!-- Creator Section Card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/about_card_background"
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="#38b6ff"
+                android:text="@string/about_creator"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/TVCreatorInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="4dp"
+                android:textSize="14sp"
+                android:textColor="#dce2e8"
+                android:textColorLink="#38b6ff" />
+        </LinearLayout>
+
+        <!-- Social Links Section Card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/about_card_background"
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="#38b6ff"
+                android:text="@string/about_social_links"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/TVSocialLinks"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="4dp"
+                android:textSize="14sp"
+                android:textColor="#dce2e8"
+                android:textColorLink="#38b6ff" />
+        </LinearLayout>
+
+        <!-- Support Section Card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/about_card_background"
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="#38b6ff"
+                android:text="@string/about_donate"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/TVDonationLinks"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="4dp"
+                android:textSize="14sp"
+                android:textColor="#dce2e8"
+                android:textColorLink="#38b6ff" />
+        </LinearLayout>
+
+        <!-- Credits Section Card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/about_card_background"
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="#38b6ff"
+                android:text="@string/credits_and_third_party_apps"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/TVCreditsAndThirdPartyApps"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="4dp"
+                android:textSize="14sp"
+                android:textColor="#dce2e8"
+                android:textColorLink="#38b6ff" />
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="320dp"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <Button
+        android:id="@+id/BTWineCmd"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/wine_cmd" />
+
+    <Button
+        android:id="@+id/BTWineTaskmgr"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/wine_taskmgr" />
+
+    <Button
+        android:id="@+id/BTWineWinecfg"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/wine_winecfg" />
+
+    <Button
+        android:id="@+id/BTWineRegedit"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/wine_regedit" />
+
+    <Button
+        android:id="@+id/BTWineIexplore"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/wine_iexplore" />
+
+    <Button
+        android:id="@+id/BTWineWordpad"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/wine_wordpad" />
+</LinearLayout>
