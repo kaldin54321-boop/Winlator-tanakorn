@@ -44,20 +44,22 @@ public class VortekConfigDialog extends ContentDialog {
 
         mscbTuDebug.setPopupWindowWidth(300);
         mscbTuDebug.setDisplayText(context.getString(R.string.multiselection_combobox_display_text));
-        mscbTuDebug.setItems(TurnipConfigDialog.TU_DEBUG_OPTIONS);
 
         KeyValueSet config = new KeyValueSet(anchor.getTag());
+
+        String adrenotoolsDriver = config.get("adrenotoolsDriver");
+        String initialDriverForTuDebug = adrenotoolsDriver.isEmpty() ? "System" : adrenotoolsDriver;
+        mscbTuDebug.setItems(getVortekTuDebugOptions(context, initialDriverForTuDebug));
 
         String exposedDeviceExtensionsVal = config.get("exposedDeviceExtensions", "all");
         if (exposedDeviceExtensionsVal.contains("|")) exposedDeviceExtensionsVal = "all";
         final String savedExposedExtensionsVal = exposedDeviceExtensionsVal;
 
-        String tuDebugVal = TurnipConfigDialog.processTuDebug(context, config.get("tuDebug", ""));
+        String tuDebugVal = processVortekTuDebug(context, config.get("tuDebug", ""), initialDriverForTuDebug);
         mscbTuDebug.setSelectedItems(tuDebugVal.split(":"));
 
         cbTurnipGlitchFix.setChecked(config.getBoolean("turnipGlitchFix"));
 
-        String adrenotoolsDriver = config.get("adrenotoolsDriver");
         GeneralComponents.initViews(GeneralComponents.Type.ADRENOTOOLS_DRIVER, findViewById(R.id.AdrenotoolsDriverToolbox), sAdrenotoolsDriver, adrenotoolsDriver, "System");
 
         Runnable updateGlitchFixVisibility = () -> {
@@ -96,6 +98,7 @@ public class VortekConfigDialog extends ContentDialog {
                 String driverName = selected != null ? selected.toString() : "";
                 updateGlitchFixVisibility.run();
                 updateExposedExtensions.call(driverName);
+                refreshTuDebugOptions(context, mscbTuDebug, driverName);
             }
 
             @Override
@@ -133,7 +136,9 @@ public class VortekConfigDialog extends ContentDialog {
             }
 
             String[] selectedTuDebug = mscbTuDebug.getSelectedItems();
-            String tuDebugStr = TurnipConfigDialog.processTuDebug(context, String.join(":", selectedTuDebug));
+            Object selectedDriver = sAdrenotoolsDriver.getSelectedItem();
+            String currentDriver = selectedDriver != null ? selectedDriver.toString() : "System";
+            String tuDebugStr = processVortekTuDebug(context, String.join(":", selectedTuDebug), currentDriver);
             newConfig.put("tuDebug", tuDebugStr);
 
             if (cbTurnipGlitchFix.getVisibility() == View.VISIBLE) {
@@ -159,8 +164,111 @@ public class VortekConfigDialog extends ContentDialog {
         }
 
         String rawTuDebug = config.get("tuDebug", "");
-        String tuDebug = TurnipConfigDialog.processTuDebug(context, rawTuDebug).replace(":", ",");
+        String tuDebug = processVortekTuDebug(context, rawTuDebug, config.get("adrenotoolsDriver", "System")).replace(":", ",");
         envVars.put("TU_DEBUG", tuDebug);
+    }
+
+    /**
+     * Vortek-specific TU_DEBUG rules (Turnip's {@code processTuDebug} is left
+     * untouched so the Turnip dialog keeps its existing behavior).
+     * <ul>
+     *   <li>Non-Adreno GPUs (Mali, PowerVR, Xclipse, …): both {@code sysmem}
+     *       and {@code gmem} are stripped — they are Turnip/Adreno-only flags.</li>
+     *   <li>Adreno 6xx/7xx/8xx + System/Qualcomm driver: {@code sysmem} is
+     *       enforced, {@code gmem} is stripped.</li>
+     *   <li>Adreno 710/720/732 + imported Turnip (Adrenotools) driver:
+     *       {@code gmem} is enforced, {@code sysmem} is stripped.</li>
+     *   <li>Other Adreno + Turnip driver, or Adreno + any other driver:
+     *       falls back to {@code sysmem} (safe default, mirrors Turnip).</li>
+     * </ul>
+     */
+    public static String processVortekTuDebug(Context context, String tuDebugVal, String adrenotoolsDriver) {
+        androidx.collection.ArraySet<String> items = new androidx.collection.ArraySet<>();
+        if (tuDebugVal != null && !tuDebugVal.isEmpty()) {
+            String[] split = tuDebugVal.contains(":") ? tuDebugVal.split(":") : tuDebugVal.split(",");
+            for (String item : split) {
+                String trimmed = item.trim();
+                if (!trimmed.isEmpty()) items.add(trimmed);
+            }
+        }
+
+        items.add("noconform");
+
+        if (!isVortekAdreno(context)) {
+            items.remove("sysmem");
+            items.remove("gmem");
+        }
+        else if (isVortekTurnipDriver(adrenotoolsDriver) && isVortekGmemDevice(context)) {
+            items.remove("sysmem");
+            items.add("gmem");
+        }
+        else {
+            // Covers: Adreno + System/Qualcomm -> sysmem; Adreno non-GMEM +
+            // Turnip -> sysmem; Adreno + unknown driver -> sysmem (safe).
+            items.remove("gmem");
+            items.add("sysmem");
+        }
+
+        return String.join(":", items);
+    }
+
+    /**
+     * TU_DEBUG choices offered in the Vortek dialog for the given driver.
+     * Options that {@link #processVortekTuDebug} would strip are not offered,
+     * so they appear disabled/unselectable for that GPU + driver combo.
+     */
+    public static String[] getVortekTuDebugOptions(Context context, String adrenotoolsDriver) {
+        boolean isAdreno = isVortekAdreno(context);
+        boolean gmemAllowed = isAdreno && isVortekTurnipDriver(adrenotoolsDriver) && isVortekGmemDevice(context);
+        boolean sysmemAllowed = isAdreno && !gmemAllowed;
+        if (!isAdreno) {
+            return filterTuDebugOptions(false, false);
+        }
+        return filterTuDebugOptions(sysmemAllowed, gmemAllowed);
+    }
+
+    private static String[] filterTuDebugOptions(boolean sysmemAllowed, boolean gmemAllowed) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String opt : TurnipConfigDialog.TU_DEBUG_OPTIONS) {
+            if (!sysmemAllowed && opt.equals("sysmem")) continue;
+            if (!gmemAllowed && opt.equals("gmem")) continue;
+            out.add(opt);
+        }
+        return out.toArray(new String[0]);
+    }
+
+    private static void refreshTuDebugOptions(Context context, MultiSelectionComboBox mscbTuDebug, String driverName) {
+        if (mscbTuDebug == null) return;
+        String[] currentSelected = mscbTuDebug.getSelectedItems();
+        mscbTuDebug.setItems(getVortekTuDebugOptions(context, driverName));
+        // Re-apply the surviving selection through the Vortek rules so a
+        // switch from e.g. Turnip->System (or Adreno->Mali) immediately drops
+        // the now-invalid sysmem/gmem flag instead of keeping it invisibly.
+        String repruned = processVortekTuDebug(context, String.join(":", currentSelected), driverName);
+        java.util.ArrayList<String> keep = new java.util.ArrayList<>();
+        java.util.Set<String> allowed = new java.util.HashSet<>(java.util.Arrays.asList(mscbTuDebug.getItems()));
+        for (String part : repruned.split(":")) {
+            if (!part.isEmpty() && allowed.contains(part)) keep.add(part);
+        }
+        // MultiSelectionComboBox accumulates; rebuild from the pruned set by
+        // re-selecting only allowed items (stale flags are dropped because
+        // getSelectedItems() only returns items in the current item list).
+        mscbTuDebug.setSelectedItems(keep.toArray(new String[0]));
+    }
+
+    private static boolean isVortekAdreno(Context context) {
+        short modelId = GPUHelper.getAdrenoModelId(context);
+        return modelId >= 600 && modelId <= 899;
+    }
+
+    private static boolean isVortekGmemDevice(Context context) {
+        short modelId = GPUHelper.getAdrenoModelId(context);
+        return modelId == 710 || modelId == 720 || modelId == 732;
+    }
+
+    private static boolean isVortekTurnipDriver(String adrenotoolsDriver) {
+        if (adrenotoolsDriver == null) return false;
+        return adrenotoolsDriver.toLowerCase(Locale.ROOT).contains("turnip");
     }
 
     public static boolean isRequireRestart(String oldGraphicsDriverConfig, String newGraphicsDriverConfig) {

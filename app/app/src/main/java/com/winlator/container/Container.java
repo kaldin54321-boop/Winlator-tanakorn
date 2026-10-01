@@ -17,7 +17,7 @@ import java.io.File;
 import java.util.Iterator;
 
 public class Container {
-    public static final String DEFAULT_ENV_VARS = "ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=1";
+    public static final String DEFAULT_ENV_VARS = "ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=1 VKD3D_SHADER_MODEL=6_0";
     public static final String DEFAULT_LC_ALL = "en_US.UTF-8";
     public static final String DEFAULT_TIMEZONE = "UTC";
     public static final String DEFAULT_SCREEN_SIZE = "1280x720";

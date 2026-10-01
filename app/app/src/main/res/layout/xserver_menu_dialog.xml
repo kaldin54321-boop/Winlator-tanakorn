@@ -125,7 +125,7 @@
                 android:layout_width="48dp"
                 android:layout_height="48dp"
                 android:tint="?attr/colorAccent"
-                android:src="@drawable/icon_display_settings" />
+                android:src="@drawable/icon_reset" />
 
             <TextView
                 android:layout_width="wrap_content"

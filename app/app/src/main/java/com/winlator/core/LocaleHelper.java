@@ -10,7 +10,7 @@ import androidx.preference.PreferenceManager;
 import java.util.Locale;
 
 public class LocaleHelper {
-    private static final String[] supportedLocales = {"en_US", "pt_BR", "ru_RU", "de_DE", "fr_FR", "es_ES", "it_IT", "ja_JP", "ko_KR", "tr_TR", "ar_EG", "vi_VN", "th_TH", "in_ID", "zh_CN"};
+    private static final String[] supportedLocales = {"en_US", "pt_BR", "ru_RU", "de_DE", "fr_FR", "es_ES", "it_IT", "ja_JP", "ko_KR", "tr_TR", "ar_EG", "vi_VN", "th_TH", "in_ID", "zh_CN", "pl_PL"};
 
     public static int getLocaleIndex(Context context) {
         Configuration configuration = context.getResources().getConfiguration();

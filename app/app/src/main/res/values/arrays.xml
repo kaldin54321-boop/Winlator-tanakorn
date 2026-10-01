@@ -164,6 +164,7 @@
         <item>ไทย</item>
         <item>Bahasa Indonesia</item>
         <item>中文</item>
+        <item>Polski</item>
     </string-array>
     <string-array name="resource_memory_type_entries">
         <item>@string/auto</item>

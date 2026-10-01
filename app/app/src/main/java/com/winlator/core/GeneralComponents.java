@@ -97,6 +97,7 @@ public abstract class GeneralComponents {
         }
 
         private File getSource(Context context, String identifier) {
+            identifier = GeneralComponents.normalizeComponentIdentifier(this, identifier);
             File componentDir = getComponentDir(this, context);
             switch (this) {
                 case SOUNDFONT:
@@ -106,6 +107,10 @@ public abstract class GeneralComponents {
                 default:
                     File wcpFile = new File(componentDir, lowerName()+"-"+identifier+".wcp");
                     if (wcpFile.exists()) return wcpFile;
+                    // Legacy fallback: files imported before the identifier
+                    // normalization fix were stored doubled (dxvk-dxvk-X.wcp).
+                    File legacyWcp = new File(componentDir, lowerName()+"-"+lowerName()+"-"+identifier+".wcp");
+                    if (legacyWcp.exists()) return legacyWcp;
                     return new File(componentDir, lowerName()+"-"+identifier+".tzst");
             }
         }
@@ -132,7 +137,7 @@ public abstract class GeneralComponents {
             if (this == Type.SOUNDFONT || this == ADRENOTOOLS_DRIVER) {
                 installMode = InstallMode.FILE;
             }
-            else if (this == Type.WINED3D || this == Type.DXVK || this == Type.VKD3D || this == Type.VEGAS) {
+            else if (this == Type.WINED3D || this == Type.DXVK || this == Type.VKD3D || this == Type.VEGAS || this == Type.BOX64) {
                 installMode = InstallMode.BOTH;
             }
             else installMode = InstallMode.DOWNLOAD;
@@ -187,6 +192,42 @@ public abstract class GeneralComponents {
         File file = new File(context.getFilesDir(), "/installed_components/"+type.lowerName());
         if (!file.isDirectory()) file.mkdirs();
         return file;
+    }
+
+    /**
+     * Normalizes a user-supplied version identifier for a component type.
+     * Strips any leading "&lt;type&gt;-" / "&lt;type&gt;_" prefix (case-insensitive,
+     * repeatedly so legacy "dxvk-dxvk-X" collapses) and any trailing
+     * .wcp/.tzst/.sf2 extension. This keeps the on-disk naming 1:1:
+     * identifier "2.4.1" &lt;-&gt; file "dxvk-2.4.1.wcp", no matter whether the
+     * imported file was named "dxvk-2.4.1.wcp", "DXVK_2.4.1.WCP" or "2.4.1.wcp".
+     * Follows the winlator-glibc (.wcp + profile.json) naming convention.
+     */
+    public static String normalizeComponentIdentifier(Type type, String identifier) {
+        if (identifier == null) return "";
+        String id = identifier.trim();
+        if (id.isEmpty()) return id;
+        // Strip extensions first (case-insensitive).
+        String lower = id.toLowerCase(Locale.ENGLISH);
+        for (String ext : new String[]{".wcp", ".tzst", ".sf2"}) {
+            if (lower.endsWith(ext)) {
+                id = id.substring(0, id.length() - ext.length());
+                lower = id.toLowerCase(Locale.ENGLISH);
+            }
+        }
+        // Strip leading "<type>-" / "<type>_" prefixes repeatedly.
+        String prefixDash = type.lowerName() + "-";
+        String prefixUnder = type.lowerName() + "_";
+        boolean stripped;
+        do {
+            stripped = false;
+            String idLower = id.toLowerCase(Locale.ENGLISH);
+            if (idLower.startsWith(prefixDash) || idLower.startsWith(prefixUnder)) {
+                id = id.substring(prefixDash.length());
+                stripped = true;
+            }
+        } while (stripped);
+        return id.trim();
     }
 
     public static ArrayList<String> getInstalledComponentNames(Type type, Context context) {
@@ -275,6 +316,20 @@ public abstract class GeneralComponents {
     }
 
     public static boolean extractWCPFile(File sourceFile, File destinationDir) {
+        return extractWCPFile(null, sourceFile, destinationDir);
+    }
+
+    /**
+     * Extracts a winlator-glibc style .wcp package into destinationDir.
+     * .wcp = XZ- or Zstd-compressed tar (sometimes plain zip) containing a
+     * manifest (profile.json in glibc builds; content.json/manifest.json in
+     * older packs) with a "files" array of {source,target} pairs, plus the
+     * payload files. When no usable manifest exists, falls back to a
+     * heuristic merge so DX wrappers (system32/syswow64, x64/x86, loose dlls)
+     * and rootfs overlays (box64) still install instead of silently
+     * reverting to the builtin default at container start.
+     */
+    public static boolean extractWCPFile(Type type, File sourceFile, File destinationDir) {
         if (sourceFile == null || !sourceFile.exists()) return false;
         File tempDir = new File(destinationDir.getParentFile(), "wcp_temp_" + System.currentTimeMillis());
         if (!tempDir.isDirectory()) tempDir.mkdirs();
@@ -292,61 +347,185 @@ public abstract class GeneralComponents {
             return false;
         }
 
-        File manifestFile = new File(tempDir, "content.json");
-        if (!manifestFile.exists()) manifestFile = new File(tempDir, "manifest.json");
+        int copied = 0;
+        File manifestFile = findWCPManifest(tempDir);
+        if (manifestFile != null) {
+            copied = installFromWCPManifest(manifestFile, tempDir, destinationDir);
+        }
 
-        if (manifestFile.exists()) {
-            try {
-                JSONObject json = new JSONObject(FileUtils.readString(manifestFile));
-                JSONArray files = json.optJSONArray("files");
-                if (files != null) {
-                    for (int i = 0; i < files.length(); i++) {
-                        JSONObject fileObj = files.getJSONObject(i);
-                        String sourceRel = fileObj.optString("source");
-                        String targetRel = fileObj.optString("target");
-                        if (!sourceRel.isEmpty() && !targetRel.isEmpty()) {
-                            File src = new File(tempDir, sourceRel);
-                            File dst = new File(destinationDir, targetRel);
-                            if (src.exists()) {
-                                if (dst.getParentFile() != null) dst.getParentFile().mkdirs();
-                                FileUtils.copy(src, dst);
-                            }
-                        }
+        if (copied == 0) {
+            copied = installWCPHeuristic(type, tempDir, destinationDir);
+        }
+
+        FileUtils.delete(tempDir);
+        return copied > 0;
+    }
+
+    private static File findWCPManifest(File tempDir) {
+        String[] names = {"profile.json", "content.json", "manifest.json"};
+        for (String name : names) {
+            File f = new File(tempDir, name);
+            if (f.isFile()) return f;
+        }
+        // Some packs nest the manifest one level deep.
+        File[] children = tempDir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                if (child.isDirectory()) {
+                    for (String name : names) {
+                        File f = new File(child, name);
+                        if (f.isFile()) return f;
                     }
                 }
             }
-            catch (Exception e) {}
         }
-        else {
+        return null;
+    }
+
+    private static int installFromWCPManifest(File manifestFile, File tempDir, File destinationDir) {
+        int copied = 0;
+        try {
+            JSONObject json = new JSONObject(FileUtils.readString(manifestFile));
+            JSONArray files = json.optJSONArray("files");
+            if (files == null) files = json.optJSONArray("contents");
+            if (files == null) files = json.optJSONArray("components");
+            if (files == null) files = json.optJSONArray("items");
+            if (files != null) {
+                File manifestBase = manifestFile.getParentFile();
+                for (int i = 0; i < files.length(); i++) {
+                    JSONObject fileObj = files.optJSONObject(i);
+                    if (fileObj == null) continue;
+                    String sourceRel = fileObj.optString("source",
+                        fileObj.optString("src", fileObj.optString("file", fileObj.optString("path", ""))));
+                    String targetRel = fileObj.optString("target",
+                        fileObj.optString("dest", fileObj.optString("to", fileObj.optString("destination", ""))));
+                    if (sourceRel.isEmpty() || targetRel.isEmpty()) continue;
+                    File src = new File(sourceRel).isAbsolute() ? new File(sourceRel) : new File(manifestBase, sourceRel);
+                    if (!src.exists()) src = new File(tempDir, sourceRel);
+                    if (!src.exists()) continue;
+                    File dst = resolveWCPTarget(destinationDir, targetRel);
+                    if (dst.getParentFile() != null) dst.getParentFile().mkdirs();
+                    if (src.isDirectory()) {
+                        FileUtils.copy(src, dst);
+                    } else {
+                        FileUtils.copy(src, dst);
+                    }
+                    copied++;
+                }
+            }
+        }
+        catch (Exception e) {}
+        return copied;
+    }
+
+    private static File resolveWCPTarget(File destinationDir, String targetRel) {
+        String t = targetRel.replace('\\', '/');
+        // Absolute windows paths (C:/windows/system32/...) or drive_c paths
+        // are anchored under the destination when it is the windows dir,
+        // otherwise appended to the rootfs destination.
+        String low = t.toLowerCase(Locale.ENGLISH);
+        int winIdx = low.indexOf("windows/");
+        if (winIdx >= 0 && destinationDir.getPath().replace('\\', '/').endsWith("windows")) {
+            return new File(destinationDir, t.substring(winIdx + "windows/".length()));
+        }
+        int driveIdx = low.indexOf("drive_c/");
+        if (driveIdx >= 0) {
+            String sub = t.substring(driveIdx + "drive_c/".length());
+            if (destinationDir.getPath().replace('\\', '/').endsWith("windows")) {
+                if (sub.toLowerCase(Locale.ENGLISH).startsWith("windows/")) sub = sub.substring("windows/".length());
+                return new File(destinationDir, sub);
+            }
+            return new File(destinationDir, "home/xuser/.wine/drive_c/" + sub);
+        }
+        while (t.startsWith("/")) t = t.substring(1);
+        return new File(destinationDir, t);
+    }
+
+    private static int installWCPHeuristic(Type type, File tempDir, File destinationDir) {
+        int copied = 0;
+        boolean isWindowsDir = destinationDir.getPath().replace('\\', '/').endsWith("windows");
+        if (isWindowsDir) {
             File system32 = new File(tempDir, "system32");
             File syswow64 = new File(tempDir, "syswow64");
             File x64 = new File(tempDir, "x64");
             File x86 = new File(tempDir, "x86");
             File x32 = new File(tempDir, "x32");
 
-            if (system32.exists()) FileUtils.copy(system32, new File(destinationDir, "system32"));
-            if (syswow64.exists()) FileUtils.copy(syswow64, new File(destinationDir, "syswow64"));
-            if (x64.exists()) FileUtils.copy(x64, new File(destinationDir, "system32"));
-            if (x86.exists()) FileUtils.copy(x86, new File(destinationDir, "syswow64"));
-            if (x32.exists()) FileUtils.copy(x32, new File(destinationDir, "syswow64"));
+            if (system32.isDirectory()) { FileUtils.copy(system32, new File(destinationDir, "system32")); copied++; }
+            if (syswow64.isDirectory()) { FileUtils.copy(syswow64, new File(destinationDir, "syswow64")); copied++; }
+            if (x64.isDirectory()) { FileUtils.copy(x64, new File(destinationDir, "system32")); copied++; }
+            if (x86.isDirectory()) { FileUtils.copy(x86, new File(destinationDir, "syswow64")); copied++; }
+            if (x32.isDirectory()) { FileUtils.copy(x32, new File(destinationDir, "syswow64")); copied++; }
 
-            File[] rootFiles = tempDir.listFiles();
-            if (rootFiles != null) {
-                for (File file : rootFiles) {
-                    if (file.isFile() && file.getName().toLowerCase(Locale.ENGLISH).endsWith(".dll")) {
-                        File dst32 = new File(destinationDir, "system32/" + file.getName());
-                        File dst64 = new File(destinationDir, "syswow64/" + file.getName());
-                        if (dst32.getParentFile() != null) dst32.getParentFile().mkdirs();
-                        if (dst64.getParentFile() != null) dst64.getParentFile().mkdirs();
-                        FileUtils.copy(file, dst32);
-                        FileUtils.copy(file, dst64);
-                    }
+            // Nested payload dirs (e.g. package/x64, files/system32).
+            File[] children = tempDir.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    if (!child.isDirectory()) continue;
+                    String n = child.getName().toLowerCase(Locale.ENGLISH);
+                    if (n.equals("system32") || n.equals("syswow64") || n.equals("x64") || n.equals("x86") || n.equals("x32")) continue;
+                    File c32 = new File(child, "system32");
+                    File c64 = new File(child, "syswow64");
+                    File cx64 = new File(child, "x64");
+                    File cx86 = new File(child, "x86");
+                    if (c32.isDirectory()) { FileUtils.copy(c32, new File(destinationDir, "system32")); copied++; }
+                    if (c64.isDirectory()) { FileUtils.copy(c64, new File(destinationDir, "syswow64")); copied++; }
+                    if (cx64.isDirectory()) { FileUtils.copy(cx64, new File(destinationDir, "system32")); copied++; }
+                    if (cx86.isDirectory()) { FileUtils.copy(cx86, new File(destinationDir, "syswow64")); copied++; }
                 }
             }
-        }
 
-        FileUtils.delete(tempDir);
-        return true;
+            // Loose dlls anywhere in the pack go to both arch dirs.
+            java.util.ArrayList<File> dlls = new java.util.ArrayList<>();
+            collectFilesByExt(tempDir, ".dll", dlls);
+            for (File dll : dlls) {
+                // Skip ones already covered under system32/syswow64 above.
+                String p = dll.getPath().replace('\\', '/').toLowerCase(Locale.ENGLISH);
+                if (p.contains("/system32/") || p.contains("/syswow64/") || p.contains("/x64/") || p.contains("/x86/") || p.contains("/x32/")) continue;
+                File dst32 = new File(destinationDir, "system32/" + dll.getName());
+                File dst64 = new File(destinationDir, "syswow64/" + dll.getName());
+                if (dst32.getParentFile() != null) dst32.getParentFile().mkdirs();
+                if (dst64.getParentFile() != null) dst64.getParentFile().mkdirs();
+                FileUtils.copy(dll, dst32);
+                FileUtils.copy(dll, dst64);
+                copied++;
+            }
+            if (copied > 0) return copied;
+            // Last resort for windows-dir packs with an unexpected layout:
+            // merge everything except manifests.
+            return mergeWCPDir(tempDir, destinationDir);
+        }
+        // Rootfs overlay (box64, turnip, virgl): merge the whole payload.
+        return mergeWCPDir(tempDir, destinationDir);
+    }
+
+    private static int mergeWCPDir(File tempDir, File destinationDir) {
+        int copied = 0;
+        File[] children = tempDir.listFiles();
+        if (children == null) return 0;
+        for (File child : children) {
+            String n = child.getName().toLowerCase(Locale.ENGLISH);
+            if (child.isFile() && (n.equals("profile.json") || n.equals("content.json") || n.equals("manifest.json"))) continue;
+            File dst = new File(destinationDir, child.getName());
+            if (child.isDirectory()) {
+                if (dst.getParentFile() != null) dst.getParentFile().mkdirs();
+                FileUtils.copy(child, dst);
+                copied++;
+            } else {
+                if (dst.getParentFile() != null) dst.getParentFile().mkdirs();
+                if (FileUtils.copy(child, dst)) copied++;
+            }
+        }
+        return copied;
+    }
+
+    private static void collectFilesByExt(File dir, String ext, java.util.ArrayList<File> out) {
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (child.isDirectory()) collectFilesByExt(child, ext, out);
+            else if (child.getName().toLowerCase(Locale.ENGLISH).endsWith(ext)) out.add(child);
+        }
     }
 
     public static void extractFile(Type type, Context context, String identifier, String defaultVersion) {
@@ -367,10 +546,28 @@ public abstract class GeneralComponents {
             // 0.3.8->0.4.0, 0.4.0->0.4.4, 0.4.4->0.3.8). The version number is
             // extracted via regex so every label form ("0.3.8", "Box64 0.3.8",
             // "box64-0.4.0", "v0.4.4") resolves to the same asset.
-            String norm = com.winlator.box64.Box64Utils.normalizeBox64Version(identifier);
-            if (norm.isEmpty()) norm = com.winlator.box64.Box64Utils.normalizeBox64Version(defaultVersion);
-            if (norm.isEmpty()) norm = defaultVersion;
-            identifier = norm;
+            // Imported .wcp builds keep their full identifier (e.g.
+            // "0.3.1-017d13a") so they resolve to box64-0.3.1-017d13a.wcp
+            // instead of being truncated to 0.3.1 and falling back to default.
+            String fullId = normalizeComponentIdentifier(type, identifier);
+            if (!fullId.isEmpty()) {
+                File componentDir = getComponentDir(type, context);
+                File wcp = new File(componentDir, type.lowerName()+"-"+fullId+".wcp");
+                File tzst = new File(componentDir, type.lowerName()+"-"+fullId+".tzst");
+                if (wcp.exists() || tzst.exists()) {
+                    identifier = fullId;
+                } else {
+                    String norm = com.winlator.box64.Box64Utils.normalizeBox64Version(identifier);
+                    if (norm.isEmpty()) norm = com.winlator.box64.Box64Utils.normalizeBox64Version(defaultVersion);
+                    if (norm.isEmpty()) norm = defaultVersion;
+                    identifier = norm;
+                }
+            } else {
+                String norm = com.winlator.box64.Box64Utils.normalizeBox64Version(identifier);
+                if (norm.isEmpty()) norm = com.winlator.box64.Box64Utils.normalizeBox64Version(defaultVersion);
+                if (norm.isEmpty()) norm = defaultVersion;
+                identifier = norm;
+            }
         }
 
         if (isBuiltinComponent(type, identifier)) {
@@ -398,12 +595,17 @@ public abstract class GeneralComponents {
         }
         else {
             File componentDir = getComponentDir(type, context);
+            identifier = normalizeComponentIdentifier(type, identifier);
             File sourceWCP = new File(componentDir, type.lowerName()+"-"+identifier+".wcp");
+            if (!sourceWCP.exists()) {
+                File legacyWcp = new File(componentDir, type.lowerName()+"-"+type.lowerName()+"-"+identifier+".wcp");
+                if (legacyWcp.exists()) sourceWCP = legacyWcp;
+            }
             File sourceTZST = new File(componentDir, type.lowerName()+"-"+identifier+".tzst");
             boolean success = false;
 
             if (sourceWCP.exists()) {
-                success = extractWCPFile(sourceWCP, destination);
+                success = extractWCPFile(type, sourceWCP, destination);
             }
             else if (sourceTZST.exists()) {
                 success = TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, sourceTZST, destination, onExtractFileListener);
@@ -417,7 +619,29 @@ public abstract class GeneralComponents {
     }
 
     private static String parseDisplayText(Type type, String filename) {
-        return filename.replace(type.lowerName()+"-", "").replace(".tzst", "").replace(".wcp", "").replace(".sf2", "");
+        if (filename == null) return "";
+        String name = filename.trim();
+        String lower = name.toLowerCase(Locale.ENGLISH);
+        for (String ext : new String[]{".tzst", ".wcp", ".sf2"}) {
+            if (lower.endsWith(ext)) {
+                name = name.substring(0, name.length() - ext.length());
+                lower = name.toLowerCase(Locale.ENGLISH);
+            }
+        }
+        // Strip the "<type>-" / "<type>_" prefix repeatedly so both
+        // "dxvk-2.4.1" and legacy "dxvk-dxvk-2.4.1" display as "2.4.1".
+        String prefixDash = type.lowerName() + "-";
+        String prefixUnder = type.lowerName() + "_";
+        boolean stripped;
+        do {
+            stripped = false;
+            String nLower = name.toLowerCase(Locale.ENGLISH);
+            if (nLower.startsWith(prefixDash) || nLower.startsWith(prefixUnder)) {
+                name = name.substring(prefixDash.length());
+                stripped = true;
+            }
+        } while (stripped);
+        return name;
     }
 
     private static void downloadComponentFile(final Type type, final String filename, final Spinner spinner, final String defaultItem) {
@@ -646,9 +870,13 @@ public abstract class GeneralComponents {
                     }
                     default: {
                         if (fileName.toLowerCase(Locale.ENGLISH).endsWith(".wcp")) {
-                            String identifier = fileName.replace("vegas-", "").replace("vegas_", "").replace(".wcp", "");
+                            String identifier = normalizeComponentIdentifier(type, fileName);
+                            if (identifier.isEmpty()) identifier = normalizeComponentIdentifier(type, fileName.replaceAll("(?i)\\.wcp$", ""));
                             File destination = new File(getComponentDir(type, activity), type.lowerName()+"-"+identifier+".wcp");
                             if (destination.isFile()) FileUtils.delete(destination);
+                            // Clean up a legacy doubled file with the same version.
+                            File legacy = new File(getComponentDir(type, activity), type.lowerName()+"-"+type.lowerName()+"-"+identifier+".wcp");
+                            if (legacy.isFile()) FileUtils.delete(legacy);
                             if (FileUtils.copy(tempSourceFile, destination)) loadSpinner(type, spinner, identifier, defaultItem);
                             break;
                         }
@@ -729,6 +957,13 @@ public abstract class GeneralComponents {
                     PopupMenu popupMenu = new PopupMenu(context, v);
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) popupMenu.setForceShowIcon(true);
                     popupMenu.inflate(R.menu.open_file_popup_menu);
+                    // The Kron4ek wine build entry belongs to the Wine version
+                    // picker only; hide it for DXVK/VKD3D/WineD3D/Vegas/Box64.
+                    try {
+                        if (popupMenu.getMenu().findItem(R.id.menu_item_download_kron4ek) != null) {
+                            popupMenu.getMenu().findItem(R.id.menu_item_download_kron4ek).setVisible(false);
+                        }
+                    } catch (Exception ignored) {}
                     popupMenu.setOnMenuItemClickListener((menuItem) -> {
                         int itemId = menuItem.getItemId();
                         if (itemId == R.id.menu_item_open_file) {

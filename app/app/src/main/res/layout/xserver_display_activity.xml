@@ -17,6 +17,7 @@
         android:layout_gravity="start"
         android:id="@+id/NavigationView"
         app:headerLayout="@layout/main_menu_header"
+        app:itemIconSize="24dp"
         app:itemIconTint="?attr/colorAccent"
         app:itemTextColor="?attr/colorPrimaryText"
         android:background="?attr/colorSecondarySurface"

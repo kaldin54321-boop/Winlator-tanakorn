@@ -200,6 +200,11 @@ public class InputControlsFragment extends Fragment {
             PopupMenu popupMenu = new PopupMenu(context, v);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) popupMenu.setForceShowIcon(true);
             popupMenu.inflate(R.menu.open_file_popup_menu);
+            try {
+                if (popupMenu.getMenu().findItem(R.id.menu_item_download_kron4ek) != null) {
+                    popupMenu.getMenu().findItem(R.id.menu_item_download_kron4ek).setVisible(false);
+                }
+            } catch (Exception ignored) {}
             popupMenu.setOnMenuItemClickListener((menuItem) -> {
                 int itemId = menuItem.getItemId();
                 if (itemId == R.id.menu_item_open_file) {

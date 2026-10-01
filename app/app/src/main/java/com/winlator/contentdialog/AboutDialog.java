@@ -64,6 +64,7 @@ public class AboutDialog extends ContentDialog {
                 context.getString(R.string.about_credits_vegas) + " (<a href=\"https://github.com/isygold/vegas-releases\">isygold</a>)",
                 context.getString(R.string.about_credits_wine) + " (<a href=\"https://www.winehq.org\">winehq.org</a>)",
                 context.getString(R.string.about_credits_box86_box64) + " <a href=\"https://github.com/ptitSeb\">ptitseb</a>",
+                context.getString(R.string.about_credits_game_stores) + " <a href=\"https://github.com/The412Banner\">The412Banner</a>",
                 context.getString(R.string.about_credits_mesa) + " (<a href=\"https://www.mesa3d.org\">mesa3d.org</a>)",
                 context.getString(R.string.about_credits_dxvk) + " (<a href=\"https://github.com/doitsujin/dxvk\">github.com/doitsujin/dxvk</a>)",
                 context.getString(R.string.about_credits_vkd3d) + " (<a href=\"https://gitlab.winehq.org/wine/vkd3d\">gitlab.winehq.org/wine/vkd3d</a>)",

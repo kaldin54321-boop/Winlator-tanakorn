@@ -35,6 +35,7 @@ import com.winlator.contentdialog.SaveEditDialog;
 import com.winlator.contentdialog.SaveSettingsDialog;
 import com.winlator.saves.Save;
 import com.winlator.saves.SaveManager;
+import com.winlator.socialhub.SocialHubFragment;
 import com.winlator.core.AppUtils;
 import com.winlator.core.Callback;
 import com.winlator.core.LocaleHelper;
@@ -178,6 +179,9 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             return;
         }
         if (currentFragment != null && currentFragment.isVisible()) {
+            if (currentFragment instanceof SocialHubFragment) {
+                if (((SocialHubFragment)currentFragment).onBackPressed()) return;
+            }
             if (currentFragment instanceof BaseFileManagerFragment) {
                 BaseFileManagerFragment fileManagerFragment = (BaseFileManagerFragment)currentFragment;
                 if (fileManagerFragment.onBackPressed()) return;
@@ -272,6 +276,9 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 break;
             case R.id.menu_item_device:
                 showFragment(new DeviceFragment());
+                break;
+            case R.id.menu_item_social_hub:
+                showFragment(new SocialHubFragment());
                 break;
             case R.id.menu_item_about:
                 (new AboutDialog(this)).show();

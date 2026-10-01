@@ -10,6 +10,7 @@
         <item android:icon="@drawable/icon_save_manager" android:id="@+id/menu_item_saves" android:title="@string/save_game_manager" />
         <item android:icon="@drawable/icon_box64rc" android:id="@+id/menu_item_box64_rc" android:title="@string/box64_rc_file" />
         <item android:icon="@drawable/icon_device" android:id="@+id/menu_item_device" android:title="@string/device" />
+        <item android:icon="@drawable/icon_social_hub" android:id="@+id/menu_item_social_hub" android:title="@string/social_hub" />
         <item android:icon="@drawable/icon_about_info" android:id="@+id/menu_item_about" android:title="@string/about" />
     </group>
 </menu>

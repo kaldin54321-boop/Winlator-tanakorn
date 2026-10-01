@@ -6,13 +6,13 @@
         <item android:icon="@drawable/icon_input_controls" android:id="@+id/menu_item_input_controls" android:title="@string/input_controls" />
         <item android:icon="@drawable/icon_screen_effect" android:id="@+id/menu_item_screen_effect" android:title="@string/screen_effect" />
         <item android:icon="@drawable/icon_fullscreen" android:id="@+id/menu_item_toggle_fullscreen" android:title="@string/toggle_fullscreen" />
-        <item android:icon="@drawable/icon_display_settings" android:id="@+id/menu_item_toggle_orientation" android:title="@string/toggle_orientation" />
+        <item android:icon="@drawable/icon_reset" android:id="@+id/menu_item_toggle_orientation" android:title="@string/toggle_orientation" />
         <item android:icon="@drawable/icon_task_manager" android:id="@+id/menu_item_task_manager" android:title="@string/task_manager" />
         <item android:icon="@drawable/icon_magnifier" android:id="@+id/menu_item_magnifier" android:title="@string/magnifier" />
         <item android:icon="@drawable/icon_pip_mode" android:id="@+id/menu_item_pip_mode" android:title="@string/pip_mode" />
         <item android:icon="@drawable/icon_help" android:id="@+id/menu_item_touchpad_help" android:title="@string/touchpad_help" />
         <item android:icon="@drawable/icon_exit" android:id="@+id/menu_item_exit" android:title="@string/exit" />
-        <item android:icon="@drawable/icon_display_settings" android:id="@+id/menu_item_soft_stretch" android:title="@string/soft_stretch" />
+        <item android:icon="@drawable/icon_fullscreen" android:id="@+id/menu_item_soft_stretch" android:title="@string/soft_stretch" />
         <item android:icon="@drawable/icon_wine" android:id="@+id/menu_item_wine_apps" android:title="@string/wine_apps" />
         <item android:icon="@drawable/icon_active_windows" android:id="@+id/menu_item_active_windows" android:title="@string/active_windows" />
         <item android:icon="@drawable/icon_debug" android:id="@+id/menu_item_logs" android:title="@string/logs" />

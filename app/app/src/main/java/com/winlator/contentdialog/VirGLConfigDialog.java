@@ -36,7 +36,10 @@ public class VirGLConfigDialog extends ContentDialog {
         cbDisableTextureSRGBDecode.setChecked(config.getBoolean("disableTextureSRGBdecode", true));
 
         String driverVersion = config.get("version");
-        GeneralComponents.initViews(GeneralComponents.Type.VIRGL, findViewById(R.id.VirGLToolbox), sDriverVersion, driverVersion, DefaultVersion.VIRGL);
+        android.view.View toolbox = findViewById(R.id.VirGLToolbox);
+        GeneralComponents.initViews(GeneralComponents.Type.VIRGL, toolbox, sDriverVersion, driverVersion, DefaultVersion.VIRGL);
+        // VirGL builds ship inside the app; no import/delete supported.
+        if (toolbox != null) toolbox.setVisibility(View.GONE);
 
         setOnConfirmCallback(() -> {
             KeyValueSet newConfig = new KeyValueSet();
