@@ -8,7 +8,7 @@ Winlator@Frost is an Android application that lets you to run Windows (x86_64) a
 
 # Installation
 
-1. Download and install the APK (Winlator@Frost_11.2_V1_Stable.apk) from [Official Website of the Releases Page](https://tanakorn-website.onrender.com/downloads)
+1. Download and install the APK (Winlator@Frost_11.2_V1_Stable.apk) from [Official Website of the Releases Page](https://winlator-frost.tanakorn-website.workers.dev/downloads)
 2. Launch the app and wait for the installation process to finish
 
 ----
