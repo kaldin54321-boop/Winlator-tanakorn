@@ -48,8 +48,10 @@ public class TurnipConfigDialog extends ContentDialog {
         AppUtils.setSpinnerSelectionFromMemorySize(sMaxDeviceMemory, config.get("maxDeviceMemory", "0"));
         sPresentMode.setSelection(config.getInt("presentMode", DEFAULT_PRESENT_MODE.ordinal()), false);
 
-        String tuDebugVal = processTuDebug(context, config.get("tuDebug", ""));
-        mscbTuDebug.setSelectedItems(tuDebugVal.split(":"));
+        // Show exactly what the user stored. GPU-required flags (noconform,
+        // sysmem/gmem) are enforced at launch time in setEnvVars(), not baked
+        // into the dialog state, so unchecking an option actually sticks.
+        mscbTuDebug.setSelectedItems(parseTuDebugSelection(config.get("tuDebug", "")));
 
         String version = config.get("version");
         GeneralComponents.initViews(GeneralComponents.Type.TURNIP, findViewById(R.id.TurnipToolbox), sVersion, version, DefaultVersion.TURNIP);
@@ -62,12 +64,25 @@ public class TurnipConfigDialog extends ContentDialog {
             newConfig.put("presentMode", sPresentMode.getSelectedItemPosition());
             newConfig.put("turnipGlitchFix", cbTurnipGlitchFix.isChecked() ? "1" : "0");
 
+            // Store the raw user selection verbatim so OK always applies.
+            // GPU-required flags are (re-)applied in setEnvVars() instead.
             String[] selectedTuDebug = mscbTuDebug.getSelectedItems();
-            String tuDebugStr = processTuDebug(context, String.join(":", selectedTuDebug));
-            newConfig.put("tuDebug", tuDebugStr);
+            newConfig.put("tuDebug", String.join(":", selectedTuDebug));
 
             anchor.setTag(newConfig.toString());
         });
+    }
+
+    /** Split a stored tuDebug value without adding/stripping any flags. */
+    public static String[] parseTuDebugSelection(String tuDebugVal) {
+        if (tuDebugVal == null || tuDebugVal.isEmpty()) return new String[0];
+        String[] split = tuDebugVal.contains(":") ? tuDebugVal.split(":") : tuDebugVal.split(",");
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String item : split) {
+            String trimmed = item.trim();
+            if (!trimmed.isEmpty()) out.add(trimmed);
+        }
+        return out.toArray(new String[0]);
     }
 
     public static String processTuDebug(Context context, String tuDebugVal) {

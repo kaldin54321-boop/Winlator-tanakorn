@@ -48,15 +48,17 @@ public class VortekConfigDialog extends ContentDialog {
         KeyValueSet config = new KeyValueSet(anchor.getTag());
 
         String adrenotoolsDriver = config.get("adrenotoolsDriver");
-        String initialDriverForTuDebug = adrenotoolsDriver.isEmpty() ? "System" : adrenotoolsDriver;
-        mscbTuDebug.setItems(getVortekTuDebugOptions(context, initialDriverForTuDebug));
+        // Always offer the full option list so every TU_DEBUG flag stays
+        // selectable; GPU-required flags (noconform, sysmem/gmem) are enforced
+        // at launch time in setEnvVars(), not by hiding options here.
+        mscbTuDebug.setItems(TurnipConfigDialog.TU_DEBUG_OPTIONS);
 
         String exposedDeviceExtensionsVal = config.get("exposedDeviceExtensions", "all");
         if (exposedDeviceExtensionsVal.contains("|")) exposedDeviceExtensionsVal = "all";
         final String savedExposedExtensionsVal = exposedDeviceExtensionsVal;
 
-        String tuDebugVal = processVortekTuDebug(context, config.get("tuDebug", ""), initialDriverForTuDebug);
-        mscbTuDebug.setSelectedItems(tuDebugVal.split(":"));
+        // Show exactly what the user stored so unchecking an option sticks.
+        mscbTuDebug.setSelectedItems(TurnipConfigDialog.parseTuDebugSelection(config.get("tuDebug", "")));
 
         cbTurnipGlitchFix.setChecked(config.getBoolean("turnipGlitchFix"));
 
@@ -98,7 +100,9 @@ public class VortekConfigDialog extends ContentDialog {
                 String driverName = selected != null ? selected.toString() : "";
                 updateGlitchFixVisibility.run();
                 updateExposedExtensions.call(driverName);
-                refreshTuDebugOptions(context, mscbTuDebug, driverName);
+                // TU_DEBUG list is static (full options); the user's selection
+                // is left untouched on driver switches and GPU-required flags
+                // are enforced in setEnvVars().
             }
 
             @Override
@@ -135,11 +139,10 @@ public class VortekConfigDialog extends ContentDialog {
                 else newConfig.put("exposedDeviceExtensions", String.join(":", selectedItems));
             }
 
+            // Store the raw user selection verbatim so OK always applies.
+            // GPU-required flags are (re-)applied in setEnvVars() instead.
             String[] selectedTuDebug = mscbTuDebug.getSelectedItems();
-            Object selectedDriver = sAdrenotoolsDriver.getSelectedItem();
-            String currentDriver = selectedDriver != null ? selectedDriver.toString() : "System";
-            String tuDebugStr = processVortekTuDebug(context, String.join(":", selectedTuDebug), currentDriver);
-            newConfig.put("tuDebug", tuDebugStr);
+            newConfig.put("tuDebug", String.join(":", selectedTuDebug));
 
             if (cbTurnipGlitchFix.getVisibility() == View.VISIBLE) {
                 newConfig.put("turnipGlitchFix", cbTurnipGlitchFix.isChecked() ? "1" : "0");
@@ -155,6 +158,41 @@ public class VortekConfigDialog extends ContentDialog {
         if (presentModeIdx < 0 || presentModeIdx >= modes.length) presentModeIdx = DEFAULT_PRESENT_MODE.ordinal();
         String presentMode = modes[presentModeIdx].value();
         envVars.put("MESA_VK_WSI_PRESENT_MODE", presentMode);
+
+        // PanVK-on-kbase mods (e.g. FristOneRR Panvk-Mali-G57, Mesa 26.3-devel).
+        // Keys are optional; when absent the container-level Environment
+        // Variables (user-added PANVK_*) are left untouched. Values follow the
+        // upstream table: PANVK_HEAP_MB (256-16384), PANVK_ATOM_STRIDE (56/64),
+        // PANVK_TILER_HEAP_MB (16-2048), PANVK_POLY_HEAP_MB (4-512),
+        // PANVK_TRACE (0/1). Only whitelisted values are forwarded so a stale
+        // config can never inject an arbitrary PANVK_* switch (upstream warns
+        // internal PANVK_* switches break rendering).
+        String panvkHeapMb = config.get("panvkHeapMb", "");
+        if (!panvkHeapMb.isEmpty()) {
+            try {
+                int heapMb = Integer.parseInt(panvkHeapMb);
+                if (heapMb >= 256 && heapMb <= 16384) envVars.put("PANVK_HEAP_MB", String.valueOf(heapMb));
+            } catch (NumberFormatException ignored) {}
+        }
+        String panvkAtomStride = config.get("panvkAtomStride", "");
+        if (panvkAtomStride.equals("56") || panvkAtomStride.equals("64")) {
+            envVars.put("PANVK_ATOM_STRIDE", panvkAtomStride);
+        }
+        String panvkTilerHeapMb = config.get("panvkTilerHeapMb", "");
+        if (!panvkTilerHeapMb.isEmpty()) {
+            try {
+                int tilerMb = Integer.parseInt(panvkTilerHeapMb);
+                if (tilerMb >= 16 && tilerMb <= 2048) envVars.put("PANVK_TILER_HEAP_MB", String.valueOf(tilerMb));
+            } catch (NumberFormatException ignored) {}
+        }
+        String panvkPolyHeapMb = config.get("panvkPolyHeapMb", "");
+        if (!panvkPolyHeapMb.isEmpty()) {
+            try {
+                int polyMb = Integer.parseInt(panvkPolyHeapMb);
+                if (polyMb >= 4 && polyMb <= 512) envVars.put("PANVK_POLY_HEAP_MB", String.valueOf(polyMb));
+            } catch (NumberFormatException ignored) {}
+        }
+        if (config.getBoolean("panvkTrace", false)) envVars.put("PANVK_TRACE", "1");
 
         if (config.getBoolean("turnipGlitchFix")) {
             String fdDevFeatures = envVars.get("FD_DEV_FEATURES");
@@ -212,50 +250,6 @@ public class VortekConfigDialog extends ContentDialog {
         return String.join(":", items);
     }
 
-    /**
-     * TU_DEBUG choices offered in the Vortek dialog for the given driver.
-     * Options that {@link #processVortekTuDebug} would strip are not offered,
-     * so they appear disabled/unselectable for that GPU + driver combo.
-     */
-    public static String[] getVortekTuDebugOptions(Context context, String adrenotoolsDriver) {
-        boolean isAdreno = isVortekAdreno(context);
-        boolean gmemAllowed = isAdreno && isVortekTurnipDriver(adrenotoolsDriver) && isVortekGmemDevice(context);
-        boolean sysmemAllowed = isAdreno && !gmemAllowed;
-        if (!isAdreno) {
-            return filterTuDebugOptions(false, false);
-        }
-        return filterTuDebugOptions(sysmemAllowed, gmemAllowed);
-    }
-
-    private static String[] filterTuDebugOptions(boolean sysmemAllowed, boolean gmemAllowed) {
-        java.util.ArrayList<String> out = new java.util.ArrayList<>();
-        for (String opt : TurnipConfigDialog.TU_DEBUG_OPTIONS) {
-            if (!sysmemAllowed && opt.equals("sysmem")) continue;
-            if (!gmemAllowed && opt.equals("gmem")) continue;
-            out.add(opt);
-        }
-        return out.toArray(new String[0]);
-    }
-
-    private static void refreshTuDebugOptions(Context context, MultiSelectionComboBox mscbTuDebug, String driverName) {
-        if (mscbTuDebug == null) return;
-        String[] currentSelected = mscbTuDebug.getSelectedItems();
-        mscbTuDebug.setItems(getVortekTuDebugOptions(context, driverName));
-        // Re-apply the surviving selection through the Vortek rules so a
-        // switch from e.g. Turnip->System (or Adreno->Mali) immediately drops
-        // the now-invalid sysmem/gmem flag instead of keeping it invisibly.
-        String repruned = processVortekTuDebug(context, String.join(":", currentSelected), driverName);
-        java.util.ArrayList<String> keep = new java.util.ArrayList<>();
-        java.util.Set<String> allowed = new java.util.HashSet<>(java.util.Arrays.asList(mscbTuDebug.getItems()));
-        for (String part : repruned.split(":")) {
-            if (!part.isEmpty() && allowed.contains(part)) keep.add(part);
-        }
-        // MultiSelectionComboBox accumulates; rebuild from the pruned set by
-        // re-selecting only allowed items (stale flags are dropped because
-        // getSelectedItems() only returns items in the current item list).
-        mscbTuDebug.setSelectedItems(keep.toArray(new String[0]));
-    }
-
     private static boolean isVortekAdreno(Context context) {
         short modelId = GPUHelper.getAdrenoModelId(context);
         return modelId >= 600 && modelId <= 899;
@@ -273,9 +267,17 @@ public class VortekConfigDialog extends ContentDialog {
 
     public static boolean isRequireRestart(String oldGraphicsDriverConfig, String newGraphicsDriverConfig) {
         if (!oldGraphicsDriverConfig.equals(newGraphicsDriverConfig)) {
-            String oldAdrenotoolsDriver = (new KeyValueSet(oldGraphicsDriverConfig)).get("adrenotoolsDriver");
-            String newAdrenotoolsDriver = (new KeyValueSet(newGraphicsDriverConfig)).get("adrenotoolsDriver");
-            return !oldAdrenotoolsDriver.isEmpty() && !newAdrenotoolsDriver.isEmpty() && !newAdrenotoolsDriver.equals(oldAdrenotoolsDriver);
+            KeyValueSet oldConfig = new KeyValueSet(oldGraphicsDriverConfig);
+            KeyValueSet newConfig = new KeyValueSet(newGraphicsDriverConfig);
+            String oldAdrenotoolsDriver = oldConfig.get("adrenotoolsDriver");
+            String newAdrenotoolsDriver = newConfig.get("adrenotoolsDriver");
+            if (!oldAdrenotoolsDriver.isEmpty() && !newAdrenotoolsDriver.isEmpty() && !newAdrenotoolsDriver.equals(oldAdrenotoolsDriver)) return true;
+            // PanVK-on-kbase env keys are applied at container start; a change
+            // needs the same restart as a driver switch.
+            for (String key : new String[]{"panvkHeapMb", "panvkAtomStride", "panvkTilerHeapMb", "panvkPolyHeapMb", "panvkTrace"}) {
+                if (!oldConfig.get(key, "").equals(newConfig.get(key, ""))) return true;
+            }
+            return false;
         }
         else return false;
     }

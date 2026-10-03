@@ -20,7 +20,7 @@ public class AboutDialog extends ContentDialog {
             PackageInfo pInfo = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
 
             TextView tvWebpage = findViewById(R.id.TVWebpage);
-            String webpageHTML = "<a href=\"https://tanakorn-website.onrender.com\">" + context.getString(R.string.about_main_website) + "</a>";
+            String webpageHTML = "<a href=\"https://winlator-frost.tanakorn-website.workers.dev/en\">" + context.getString(R.string.about_main_website) + "</a>";
             tvWebpage.setText(Html.fromHtml(webpageHTML, Html.FROM_HTML_MODE_LEGACY));
             tvWebpage.setMovementMethod(LinkMovementMethod.getInstance());
 

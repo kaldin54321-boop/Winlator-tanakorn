@@ -17,7 +17,6 @@ import com.winlator.R;
 import com.winlator.core.UnitUtils;
 
 import java.util.ArrayList;
-import java.util.Collections;
 
 public class MultiSelectionComboBox extends AppCompatTextView {
     private String[] items;
@@ -64,7 +63,7 @@ public class MultiSelectionComboBox extends AppCompatTextView {
 
     private void updateDisplayText() {
         if (displayText != null && !displayText.isEmpty()) {
-            String itemCount = String.valueOf(items.length);
+            String itemCount = String.valueOf(items != null ? items.length : 0);
             String selectedItemCount = String.valueOf(selectedItemSet.size());
             setText(displayText.replaceFirst("%d", selectedItemCount).replaceFirst("%d", itemCount));
         }
@@ -72,18 +71,28 @@ public class MultiSelectionComboBox extends AppCompatTextView {
     }
 
     public void setSelectedItems(String[] selectedItems) {
-        Collections.addAll(selectedItemSet, selectedItems);
+        // Replace (not accumulate) so reopening a dialog or refreshing the
+        // item list never resurrects stale flags the user already unchecked.
+        // Otherwise OK would silently save options the user removed.
+        selectedItemSet.clear();
+        if (selectedItems != null) {
+            for (String item : selectedItems) {
+                if (item != null && !item.trim().isEmpty()) selectedItemSet.add(item.trim());
+            }
+        }
         updateDisplayText();
     }
 
     public String[] getSelectedItems() {
         ArrayList<String> selectedItems = new ArrayList<>();
+        if (items == null) return selectedItems.toArray(new String[0]);
         for (String item : items) if (selectedItemSet.contains(item)) selectedItems.add(item);
         return selectedItems.toArray(new String[0]);
     }
 
     public String getSelectedItemsAsString() {
         String result = "";
+        if (items == null) return result;
         for (String item : items) if (selectedItemSet.contains(item)) result += (!result.isEmpty() ? "," : "")+item;
         return result;
     }
