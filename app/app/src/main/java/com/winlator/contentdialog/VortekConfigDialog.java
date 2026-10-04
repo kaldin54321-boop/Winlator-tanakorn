@@ -48,17 +48,33 @@ public class VortekConfigDialog extends ContentDialog {
         KeyValueSet config = new KeyValueSet(anchor.getTag());
 
         String adrenotoolsDriver = config.get("adrenotoolsDriver");
-        // Always offer the full option list so every TU_DEBUG flag stays
-        // selectable; GPU-required flags (noconform, sysmem/gmem) are enforced
-        // at launch time in setEnvVars(), not by hiding options here.
-        mscbTuDebug.setItems(TurnipConfigDialog.TU_DEBUG_OPTIONS);
+        // Adreno GPU + driver detection: only the TU_DEBUG flags valid for
+        // this device GPU (Adreno series) and driver (System/Qualcomm vs
+        // imported Turnip on GMEM devices 710/720/732) are offered.
+        String initialDriverForTuDebug = adrenotoolsDriver.isEmpty() ? "System" : adrenotoolsDriver;
+        mscbTuDebug.setItems(getVortekTuDebugOptions(context, initialDriverForTuDebug));
 
         String exposedDeviceExtensionsVal = config.get("exposedDeviceExtensions", "all");
         if (exposedDeviceExtensionsVal.contains("|")) exposedDeviceExtensionsVal = "all";
         final String savedExposedExtensionsVal = exposedDeviceExtensionsVal;
 
-        // Show exactly what the user stored so unchecking an option sticks.
-        mscbTuDebug.setSelectedItems(TurnipConfigDialog.parseTuDebugSelection(config.get("tuDebug", "")));
+        // On a fresh config the GPU-required flags are pre-selected via
+        // processVortekTuDebug(). Once customized, the stored selection is
+        // shown verbatim (intersected with the offered options) so OK always
+        // applies the user's changes; required flags are still re-enforced
+        // at launch in setEnvVars().
+        String storedTuDebug = config.get("tuDebug", "");
+        if (storedTuDebug.isEmpty()) {
+            mscbTuDebug.setSelectedItems(processVortekTuDebug(context, "", initialDriverForTuDebug).split(":"));
+        }
+        else {
+            java.util.Set<String> allowed = new java.util.HashSet<>(java.util.Arrays.asList(mscbTuDebug.getItems()));
+            java.util.ArrayList<String> visible = new java.util.ArrayList<>();
+            for (String part : TurnipConfigDialog.parseTuDebugSelection(storedTuDebug)) {
+                if (allowed.contains(part)) visible.add(part);
+            }
+            mscbTuDebug.setSelectedItems(visible.toArray(new String[0]));
+        }
 
         cbTurnipGlitchFix.setChecked(config.getBoolean("turnipGlitchFix"));
 
@@ -93,6 +109,11 @@ public class VortekConfigDialog extends ContentDialog {
             }
         };
 
+        // Only re-evaluate TU_DEBUG when the driver actually changes. The
+        // listener also fires once for the initial selection, which must not
+        // rewrite the stored selection, or OK could never keep the user's
+        // changes on configs where detection would add a flag back.
+        final String[] lastTuDebugDriver = {initialDriverForTuDebug};
         sAdrenotoolsDriver.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
@@ -100,9 +121,10 @@ public class VortekConfigDialog extends ContentDialog {
                 String driverName = selected != null ? selected.toString() : "";
                 updateGlitchFixVisibility.run();
                 updateExposedExtensions.call(driverName);
-                // TU_DEBUG list is static (full options); the user's selection
-                // is left untouched on driver switches and GPU-required flags
-                // are enforced in setEnvVars().
+                if (!driverName.equals(lastTuDebugDriver[0])) {
+                    lastTuDebugDriver[0] = driverName;
+                    refreshTuDebugOptions(context, mscbTuDebug, driverName);
+                }
             }
 
             @Override
@@ -248,6 +270,48 @@ public class VortekConfigDialog extends ContentDialog {
         }
 
         return String.join(":", items);
+    }
+
+    /**
+     * TU_DEBUG choices offered in the Vortek dialog for the given driver.
+     * Options that {@link #processVortekTuDebug} would strip are not offered,
+     * so they appear disabled/unselectable for that GPU + driver combo.
+     */
+    public static String[] getVortekTuDebugOptions(Context context, String adrenotoolsDriver) {
+        boolean isAdreno = isVortekAdreno(context);
+        boolean gmemAllowed = isAdreno && isVortekTurnipDriver(adrenotoolsDriver) && isVortekGmemDevice(context);
+        boolean sysmemAllowed = isAdreno && !gmemAllowed;
+        if (!isAdreno) {
+            return filterTuDebugOptions(false, false);
+        }
+        return filterTuDebugOptions(sysmemAllowed, gmemAllowed);
+    }
+
+    private static String[] filterTuDebugOptions(boolean sysmemAllowed, boolean gmemAllowed) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String opt : TurnipConfigDialog.TU_DEBUG_OPTIONS) {
+            if (!sysmemAllowed && opt.equals("sysmem")) continue;
+            if (!gmemAllowed && opt.equals("gmem")) continue;
+            out.add(opt);
+        }
+        return out.toArray(new String[0]);
+    }
+
+    private static void refreshTuDebugOptions(Context context, MultiSelectionComboBox mscbTuDebug, String driverName) {
+        if (mscbTuDebug == null) return;
+        String[] currentSelected = mscbTuDebug.getSelectedItems();
+        mscbTuDebug.setItems(getVortekTuDebugOptions(context, driverName));
+        // Re-apply the surviving selection through the Vortek rules so a
+        // switch from e.g. Turnip->System (or Adreno->Mali) immediately drops
+        // the now-invalid sysmem/gmem flag instead of keeping it invisibly.
+        // (setSelectedItems() replaces, so stale flags cannot accumulate.)
+        String repruned = processVortekTuDebug(context, String.join(":", currentSelected), driverName);
+        java.util.ArrayList<String> keep = new java.util.ArrayList<>();
+        java.util.Set<String> allowed = new java.util.HashSet<>(java.util.Arrays.asList(mscbTuDebug.getItems()));
+        for (String part : repruned.split(":")) {
+            if (!part.isEmpty() && allowed.contains(part)) keep.add(part);
+        }
+        mscbTuDebug.setSelectedItems(keep.toArray(new String[0]));
     }
 
     private static boolean isVortekAdreno(Context context) {

@@ -48,10 +48,16 @@ public class TurnipConfigDialog extends ContentDialog {
         AppUtils.setSpinnerSelectionFromMemorySize(sMaxDeviceMemory, config.get("maxDeviceMemory", "0"));
         sPresentMode.setSelection(config.getInt("presentMode", DEFAULT_PRESENT_MODE.ordinal()), false);
 
-        // Show exactly what the user stored. GPU-required flags (noconform,
-        // sysmem/gmem) are enforced at launch time in setEnvVars(), not baked
-        // into the dialog state, so unchecking an option actually sticks.
-        mscbTuDebug.setSelectedItems(parseTuDebugSelection(config.get("tuDebug", "")));
+        // Adreno GPU detection: on a fresh config (nothing stored yet) the
+        // required flags (noconform + gmem on 710/720/732, else sysmem) are
+        // pre-selected via processTuDebug(). Once the user has customized the
+        // selection it is shown verbatim so OK always applies their changes;
+        // the required flags are still re-enforced at launch in setEnvVars().
+        String storedTuDebug = config.get("tuDebug", "");
+        if (storedTuDebug.isEmpty()) {
+            mscbTuDebug.setSelectedItems(processTuDebug(context, "").split(":"));
+        }
+        else mscbTuDebug.setSelectedItems(parseTuDebugSelection(storedTuDebug));
 
         String version = config.get("version");
         GeneralComponents.initViews(GeneralComponents.Type.TURNIP, findViewById(R.id.TurnipToolbox), sVersion, version, DefaultVersion.TURNIP);
